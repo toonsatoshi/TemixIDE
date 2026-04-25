@@ -1,0 +1,8 @@
+{
+  "projects": [{
+    "name": "Target",
+    "path": "./contract.tact",
+    "output": "./build",
+    "options": { "debug": true, "masterchain": false, "external": true, "ipfsAbi": false, "safety": {} }
+  }]
+}

@@ -1,0 +1,8 @@
+node_modules/
+build/
+dist/
+logs/
+dev-wallet.json
+.env
+*.boc
+*.log
