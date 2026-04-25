@@ -30,6 +30,7 @@ const CHANNEL_ID  = process.env.TELEGRAM_CHANNEL_ID ? String(process.env.TELEGRA
 const ENV         = process.env.TACT_ENV     || 'development';
 const NETWORK     = process.env.TACT_NETWORK || 'testnet';
 const IS_TESTNET  = NETWORK === 'testnet';
+const DEBUG_MODE  = process.env.DEBUG === 'true' || ENV === 'development';
 const LOG_DIR     = path.resolve(__dirname, 'logs');
 const WALLET_FILE = path.join(__dirname, 'dev-wallet.json');
 const BUILD_DIR   = path.join(__dirname, 'build');
@@ -106,13 +107,15 @@ function loadState() {
   if (fs.existsSync(STATE_FILE)) {
     try {
       state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) };
-    } catch (e) { console.error('Failed to load state:', e.message); }
+      console.log(`[INFO] State loaded from ${STATE_FILE}`);
+    } catch (e) { console.error(`[ERROR] Failed to load state: ${e.message}`); }
   }
 }
 function saveState() {
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (e) { console.error('Failed to save state:', e.message); }
+    if (DEBUG_MODE) console.log(`[DEBUG] State saved to ${STATE_FILE}`);
+  } catch (e) { console.error(`[ERROR] Failed to save state: ${e.message}`); }
 }
 loadState();
 
@@ -131,7 +134,7 @@ async function withRetry(fn, retries = 10) {
 
       if (isRetryable) {
         const wait = (2000 * (i + 1)) + Math.random() * 1000; // Added jitter
-        console.warn(`\x1b[33m[Retry ${i+1}/${retries}] RPC error: ${msg.slice(0,100)}. Retrying in ${Math.round(wait)}ms...\x1b[0m`);
+        console.warn(`[WARN] RPC error: ${msg.slice(0,100)}. Retrying (${i+1}/${retries}) in ${Math.round(wait)}ms...`);
         wsBroadcast('warn', `RPC Error: ${msg.slice(0,50)}. Retrying (${i+1}/${retries})...`);
         await new Promise(r => setTimeout(r, wait));
       } else {
@@ -166,28 +169,33 @@ async function getEndpoint() {
     try {
       const idx = (startIdx + i) % providers.length;
       const url = await providers[idx]();
-      if (url) return url;
+      if (url && !url.includes('tonhub.run')) {
+        if (DEBUG_MODE) console.log(`[DEBUG] Selected RPC endpoint: ${url}`);
+        return url;
+      }
     } catch (e) {}
   }
-  return isTestnet ? 'https://testnet.toncenter.com/api/v2/jsonRPC' : 'https://toncenter.com/api/v2/jsonRPC';
+  const fallback = isTestnet ? 'https://testnet.toncenter.com/api/v2/jsonRPC' : 'https://toncenter.com/api/v2/jsonRPC';
+  if (DEBUG_MODE) console.log(`[DEBUG] Selected RPC endpoint: ${fallback}`);
+  return fallback;
 }
 
 // ─── Initialization ──────────────────────────────────────────────────────
 async function init() {
   try {
     if (!CHANNEL_ID) {
-      console.warn('\x1b[33m[!] TELEGRAM_CHANNEL_ID not set — channel broadcast disabled.\x1b[0m');
+      console.warn('[WARN] TELEGRAM_CHANNEL_ID not set — channel broadcast disabled.');
     }
     let mnemonic;
     if (fs.existsSync(WALLET_FILE)) {
       const w = JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
       if (!w.mnemonic || !Array.isArray(w.mnemonic)) throw new Error('Corrupted wallet file. Delete dev-wallet.json and restart.');
       mnemonic = w.mnemonic;
-      console.log('\x1b[32m[+] Existing development wallet loaded.\x1b[0m');
+      console.log('[INFO] Existing development wallet loaded.');
     } else {
       mnemonic = await mnemonicNew();
       fs.writeFileSync(WALLET_FILE, JSON.stringify({ mnemonic, created: new Date().toISOString() }, null, 2));
-      console.log('\x1b[33m[!] NEW wallet generated — fund it via the faucet before deploying.\x1b[0m');
+      console.log('[INFO] NEW wallet generated — fund it via the faucet before deploying.');
     }
     walletKey   = await mnemonicToPrivateKey(mnemonic);
     const endpoint = await getEndpoint();
@@ -195,16 +203,17 @@ async function init() {
     devWallet   = WalletContractV4.create({ workchain: 0, publicKey: walletKey.publicKey });
     initialized = true;
 
-    console.log('\x1b[36m╔══════════════════════════════════════════════════════════════╗\n║   🚀  TEMIXIDE v2.0  —  SERVER ONLINE                      ║\n║      Rate-Limited · Compressed · WebSocket Live Logs        ║\n╚══════════════════════════════════════════════════════════════╝\x1b[0m');
-    console.log(`\x1b[1mNetwork:\x1b[0m  \x1b[33m${NETWORK.toUpperCase()}\x1b[0m`);
-    console.log(`\x1b[1mWallet:\x1b[0m   \x1b[35m${devWallet.address.toString({ testOnly: IS_TESTNET })}\x1b[0m`);
-    console.log(`\x1b[1mEndpoint:\x1b[0m \x1b[34mhttp://localhost:${PORT}\x1b[0m`);
-    console.log(`\x1b[1mEnv:\x1b[0m      \x1b[36m${ENV}\x1b[0m\n`);
+    console.log('╔══════════════════════════════════════════════════════════════╗\n║   🚀  TEMIXIDE v2.0  —  SERVER ONLINE                      ║\n║      Rate-Limited · Compressed · WebSocket Live Logs        ║\n╚══════════════════════════════════════════════════════════════╝');
+    console.log(`[INFO] Network:  ${NETWORK.toUpperCase()}`);
+    console.log(`[INFO] Wallet:   ${devWallet.address.toString({ testOnly: IS_TESTNET })}`);
+    console.log(`[INFO] Endpoint: http://localhost:${PORT}`);
+    console.log(`[INFO] Env:      ${ENV}`);
+    if (DEBUG_MODE) console.log(`[DEBUG] Debug mode: true`);
 
     // Test broadcast
     broadcastToChannel(`🚀 *${escapeMarkdownV2('Temix IDE')}:* ${escapeMarkdownV2('Connection Live for Channel Broadcasting')}`);
   } catch (e) {
-    console.error('\x1b[31m[FATAL] Initialization failed:\x1b[0m', e.message);
+    console.error(`[ERROR] [FATAL] Initialization failed: ${e.message}`);
     process.exit(1);
   }
 }
@@ -233,7 +242,7 @@ app.get('/api/wallet', requireInit, async (req, res) => {
       network: NETWORK, walletVersion: 'V4R2'
     });
   } catch (e) {
-    console.error(`\x1b[31m[Wallet Error]\x1b[0m ${e.message}`);
+    console.error(`[ERROR] [Wallet Error] ${e.message}`);
     res.status(500).json({ error: 'Balance fetch failed: ' + e.message });
   }
 });
@@ -255,7 +264,7 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
   const id = req.requestId;
   try {
     queueCompileTask(async () => {
-      console.log(`\x1b[34m[${id}] Compiling Tact contract (${code.length} chars)...\x1b[0m`);
+      console.log(`[INFO] [${id}] Compiling Tact contract (${code.length} chars)...`);
       wsBroadcast('log', `[${id}] Compilation started`);
       fs.writeFileSync('contract.tact', code, 'utf8');
       const t0  = Date.now();
@@ -264,20 +273,20 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
       const log = out.toString();
       wsBroadcast('compile-success', `Compiled in ${dur}ms`);
       fs.appendFileSync(path.join(LOG_DIR, 'compile.log'), `[${new Date().toISOString()}] OK (${dur}ms)\n${log}\n---\n`);
-      console.log(`\x1b[32m[${id}] Compilation OK in ${dur}ms\x1b[0m`);
+      console.log(`[INFO] [${id}] Compilation OK in ${dur}ms`);
       res.json({ success: true, duration: dur, log, artifacts: fs.existsSync(BUILD_DIR) ? fs.readdirSync(BUILD_DIR) : [] });
     }).catch((e) => {
       const errLog = e.stdout ? e.stdout.toString() : e.message;
       wsBroadcast('compile-error', errLog);
       fs.appendFileSync(path.join(LOG_DIR, 'compile.log'), `[${new Date().toISOString()}] FAIL\n${errLog}\n---\n`);
-      console.error(`\x1b[31m[${id}] Compile FAILED\x1b[0m`);
+      console.error(`[ERROR] [${id}] Compile FAILED`);
       res.status(400).json({ error: errLog });
     });
   } catch (e) {
     const errLog = e.stdout ? e.stdout.toString() : e.message;
     wsBroadcast('compile-error', errLog);
     fs.appendFileSync(path.join(LOG_DIR, 'compile.log'), `[${new Date().toISOString()}] FAIL\n${errLog}\n---\n`);
-    console.error(`\x1b[31m[${id}] Compile FAILED\x1b[0m`);
+    console.error(`[ERROR] [${id}] Compile FAILED`);
     res.status(400).json({ error: errLog });
   }
 });
@@ -324,7 +333,7 @@ app.post('/api/deploy', heavyLimiter, requireInit, async (req, res) => {
   const id = req.requestId;
   const { contractName } = req.body;
   try {
-    console.log(`\x1b[34m[${id}] Deploying ${contractName || 'default'} to ${NETWORK}...\x1b[0m`);
+    console.log(`[INFO] [${id}] Deploying ${contractName || 'default'} to ${NETWORK}...`);
     wsBroadcast('log', `[${id}] Deploy sequence started for ${contractName || 'default'}`);
     
     let baseName = contractName || 'Target_Target';
@@ -350,7 +359,7 @@ app.post('/api/deploy', heavyLimiter, requireInit, async (req, res) => {
     if (fs.existsSync(dataPath)) {
       dataCell = Cell.fromBoc(fs.readFileSync(dataPath))[0];
     } else {
-      console.warn(`\x1b[33m[${id}] Data artifact missing, using default 0-bit init data\x1b[0m`);
+      console.warn(`[WARN] [${id}] Data artifact missing, using default 0-bit init data`);
       dataCell = beginCell().storeBit(0).endCell();
     }
 
@@ -373,7 +382,11 @@ app.post('/api/deploy', heavyLimiter, requireInit, async (req, res) => {
       try {
         s = await contract.getSeqno();
       } catch (e) {
-        console.warn(`\x1b[33m[${id}] Wallet seqno fetch failed, using 0: ${e.message}\x1b[0m`);
+        const msg = e.message || String(e);
+        if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+            throw e; // Let withRetry handle network errors
+        }
+        if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
       }
 
       await contract.sendTransfer({
@@ -387,7 +400,7 @@ app.post('/api/deploy', heavyLimiter, requireInit, async (req, res) => {
     const tx = { type: 'deploy', address: addrStr, ts: new Date().toISOString(), seqno };
     txHistory.unshift(tx); if (txHistory.length > MAX_TX) txHistory.pop();
     wsBroadcast('deploy-success', addrStr);
-    console.log(`\x1b[32m[${id}] Deployed: ${addrStr}\x1b[0m`);
+    console.log(`[INFO] [${id}] Deployed: ${addrStr}`);
     
     const explorerUrl = `https://${IS_TESTNET ? 'testnet.' : ''}tonviewer.com/${addrStr}`;
     
@@ -403,12 +416,13 @@ app.post('/api/deploy', heavyLimiter, requireInit, async (req, res) => {
 
   } catch (e) {
     wsBroadcast('deploy-error', e.message);
-    console.error(`\x1b[31m[${id}] Deploy failed: ${e.message}\x1b[0m`);
+    console.error(`[ERROR] [${id}] Deploy failed: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
 
 function packField(builder, field, value) {
+  if (DEBUG_MODE) console.log(`[DEBUG] Packing field ${field.name} (${field.type.type}, format: ${field.type.format}) with value: ${value}`);
   const type = field.type;
   if (type.kind !== 'simple') throw new Error(`Unsupported field kind: ${type.kind}`);
   
@@ -428,7 +442,11 @@ function packField(builder, field, value) {
       break;
     }
     case 'address': {
-      builder.storeAddress(Address.parse(value));
+      try {
+        builder.storeAddress(Address.parse(value));
+      } catch (e) {
+        throw new Error(`Invalid address for "${field.name}": ${e.message}. Please check if the address was copied correctly (e.g., check for 0 vs O) or if it is from a different network.`);
+      }
       break;
     }
     case 'bool': {
@@ -479,13 +497,13 @@ app.post('/api/interact', heavyLimiter, requireInit, async (req, res) => {
           });
       }
       body = builder.endCell();
-      console.log(`[${id}] Encoded typed message ${type} (opcode: ${typeDef.header})`);
+      console.log(`[INFO] [${id}] Encoded typed message ${type} (opcode: ${typeDef.header})`);
     } else {
       // Fallback to text message
       body = beginCell().storeUint(0, 32).storeStringTail(message).endCell();
     }
 
-    console.log(`[${id}] Sending ${type || '"' + message + '"'} to ${target} (${sendValue} TON)...\x1b[0m`);
+    console.log(`[INFO] [${id}] Sending ${type || '"' + message + '"'} to ${target} (${sendValue} TON)...`);
     wsBroadcast('log', `[${id}] Sending ${type || message} to ${target}`);
     
     const seqno = await withRetry(async () => {
@@ -498,7 +516,15 @@ app.post('/api/interact', heavyLimiter, requireInit, async (req, res) => {
 
       const contract = activeClient.open(devWallet);
       let s = 0;
-      try { s = await contract.getSeqno(); } catch (e) {}
+      try {
+        s = await contract.getSeqno();
+      } catch (e) {
+        const msg = e.message || String(e);
+        if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+            throw e;
+        }
+        if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
+      }
       
       await contract.sendTransfer({
         seqno: s, secretKey: walletKey.secretKey,
@@ -596,7 +622,7 @@ app.get('/api/file', (req, res) => {
 // ─── 404 & Global Error Handler ───────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: `${req.method} ${req.path} not found.` }));
 app.use((err, req, res, _next) => {
-  console.error('\x1b[31m[UNHANDLED]\x1b[0m', err);
+  console.error('[ERROR] [UNHANDLED]', err);
   res.status(500).json({ error: 'Internal server error.', requestId: req.requestId });
 });
 
@@ -608,7 +634,7 @@ init().then(() => {
   if (BOT_TOKEN) {
     const bot = new TelegramBot(BOT_TOKEN, { polling: true });
     pollingBotInstance = bot;
-    console.log('\x1b[32m[+] Telegram Bot (TemixIDE) active.\x1b[0m');
+    console.log('[INFO] Telegram Bot (TemixIDE) active.');
 
     const isAuthorized = (msg) => {
       if (state.authorizedUsers.length === 0) return true;
@@ -631,6 +657,7 @@ init().then(() => {
     const USER_STATE_TTL_MS = 5 * 60 * 1000;
 
     const setUserState = (chatId, data) => {
+      if (DEBUG_MODE) console.log(`[DEBUG] Setting user state for ${chatId}: ${data.action}`);
       userState[chatId] = { ...data, updatedAt: Date.now() };
     };
     const clearUserState = (chatId) => {
@@ -675,6 +702,7 @@ The professional IDE for TON, now in your pocket.
     });
 
     const handleMenuAction = async (chatId, data, msgOrQuery) => {
+      if (DEBUG_MODE) console.log(`[DEBUG] Menu action: ${data} (chat: ${chatId})`);
       const isQuery = !!msgOrQuery.id;
       const messageId = isQuery ? msgOrQuery.message.message_id : null;
 
@@ -976,6 +1004,7 @@ The professional IDE for TON, now in your pocket.
       
       const chatId = query.message.chat.id;
       const data = query.data;
+      if (DEBUG_MODE) console.log(`[DEBUG] Callback query: ${data} from ${chatId}`);
 
       // Answer immediately to avoid "query is too old" error during long RPC retries
       bot.answerCallbackQuery(query.id).catch(() => {});
@@ -989,6 +1018,7 @@ The professional IDE for TON, now in your pocket.
 
         if (data.startsWith('do_compile:')) {
           const fileName = data.split(':')[1];
+          if (DEBUG_MODE) console.log(`[INFO] Bot requested compile: ${fileName}`);
           bot.sendMessage(chatId, `🔨 <b>Compiling ${fileName}...</b>`, { parse_mode: 'HTML' });
           queueCompileTask(async () => {
             fs.writeFileSync('contract.tact', fs.readFileSync(path.join(__dirname, fileName))); // guarded by queueCompileTask
@@ -997,6 +1027,7 @@ The professional IDE for TON, now in your pocket.
             execSync('npx tact --config tact.config.json 2>&1', { stdio: 'pipe', timeout: 60000 });
             const dur = Date.now() - t0;
             const artifacts = fs.existsSync(BUILD_DIR) ? fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.code.boc')) : [];
+            console.log(`[INFO] Bot compile OK: ${fileName} (${dur}ms)`);
             bot.sendMessage(chatId, `✅ <b>Compiled ${fileName} in ${dur}ms</b>\n\n<b>Artifacts:</b> ${artifacts.map(a => `<code>${a.replace('.code.boc','')}</code>`).join(', ')}`, { parse_mode: 'HTML' });
           }).catch((e) => {
             const err = e.stdout ? e.stdout.toString() : e.message;
@@ -1006,6 +1037,7 @@ The professional IDE for TON, now in your pocket.
 
         else if (data.startsWith('do_deploy:')) {
           const name = data.split(':')[1];
+          if (DEBUG_MODE) console.log(`[INFO] Bot requested deploy: ${name}`);
           bot.sendMessage(chatId, `🚀 <b>Deploying ${name}...</b>`, { parse_mode: 'HTML' });
           try {
             const codeCell = Cell.fromBoc(fs.readFileSync(path.join(BUILD_DIR, `${name}.code.boc`)))[0];
@@ -1018,7 +1050,16 @@ The professional IDE for TON, now in your pocket.
               const endpoint = await getEndpoint();
               const activeClient = new TonClient({ endpoint });
               const contract = activeClient.open(devWallet);
-              let s = 0; try { s = await contract.getSeqno(); } catch (e) {}
+              let s = 0;
+              try {
+                s = await contract.getSeqno();
+              } catch (e) {
+                const msg = e.message || String(e);
+                if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+                    throw e;
+                }
+                if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
+              }
               await contract.sendTransfer({
                 seqno: s, secretKey: walletKey.secretKey,
                 messages: [internal({ to: address, value: '0.05', bounce: false, init: stateInit, body: beginCell().storeUint(0, 32).storeStringTail('Deploy').endCell() })]
@@ -1029,8 +1070,11 @@ The professional IDE for TON, now in your pocket.
             const addrStr = address.toString({ testOnly: IS_TESTNET });
             state.deployed[name] = addrStr; saveState();
             
+            console.log(`[INFO] Bot deploy OK: ${name} to ${addrStr}`);
             bot.sendMessage(chatId, `🎉 <b>Contract Deployed!</b>\n\n<b>Name:</b> <code>${name}</code>\n<b>Address:</b> <code>${addrStr}</code>\n<a href="https://${IS_TESTNET?'testnet.':''}tonscan.org/address/${addrStr}">View on Explorer</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
           } catch (e) {
+            console.error(`[ERROR] Bot deploy FAIL: ${name}`);
+            console.error(e);
             bot.sendMessage(chatId, "❌ <b>Deployment Failed</b>\n\n" + e.message);
           }
         }
@@ -1062,6 +1106,7 @@ The professional IDE for TON, now in your pocket.
         else if (data.startsWith('prep_int:')) {
           const [, name, type, text] = data.split(':');
           const addr = state.deployed[name];
+          if (DEBUG_MODE) console.log(`[DEBUG] Bot prep interact: ${name} (${type})`);
           
           if (type === 'text') {
               // Immediate action for text messages
@@ -1072,7 +1117,16 @@ The professional IDE for TON, now in your pocket.
                       const endpoint = await getEndpoint();
                       const activeClient = new TonClient({ endpoint });
                       const contract = activeClient.open(devWallet);
-                      let s = 0; try { s = await contract.getSeqno(); } catch (e) {}
+                      let s = 0;
+                      try {
+                        s = await contract.getSeqno();
+                      } catch (e) {
+                        const msg = e.message || String(e);
+                        if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+                            throw e;
+                        }
+                        if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
+                      }
                       await contract.sendTransfer({
                           seqno: s, secretKey: walletKey.secretKey,
                           messages: [internal({ to: Address.parse(addr), value: '0.05', bounce: true, body })]
@@ -1103,7 +1157,16 @@ The professional IDE for TON, now in your pocket.
                           const endpoint = await getEndpoint();
                           const client = new TonClient({ endpoint });
                           const contract = client.open(devWallet);
-                          let s = 0; try { s = await contract.getSeqno(); } catch (e) {}
+                          let s = 0;
+                          try {
+                            s = await contract.getSeqno();
+                          } catch (e) {
+                            const msg = e.message || String(e);
+                            if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+                                throw e;
+                            }
+                            if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
+                          }
                           await contract.sendTransfer({
                               seqno: s, secretKey: walletKey.secretKey,
                               messages: [internal({ to: Address.parse(addr), value: '0.05', bounce: true, body })]
@@ -1140,6 +1203,7 @@ The professional IDE for TON, now in your pocket.
         else if (data.startsWith('call_get:')) {
           const [, name, method] = data.split(':');
           const addr = state.deployed[name];
+          if (DEBUG_MODE) console.log(`[DEBUG] Bot call getter: ${name}.${method}()`);
           const abi = JSON.parse(fs.readFileSync(path.join(BUILD_DIR, `${name}.abi`), 'utf8'));
           const getterDef = abi.getters.find(g => g.name === method);
           
@@ -1164,6 +1228,8 @@ The professional IDE for TON, now in your pocket.
                 });
                 bot.sendMessage(chatId, `📊 *Result:* \`${name}.${method}()\`\n\n\`\`\`json\n${JSON.stringify(stack, null, 2)}\n\`\`\``, { parse_mode: 'Markdown' });
               } catch (e) {
+                console.error(`[ERROR] Bot getter FAIL: ${name}.${method}()`);
+                console.error(e);
                 bot.sendMessage(chatId, `❌ *Call Failed:* ${e.message}`);
               }
           }
@@ -1238,6 +1304,7 @@ The professional IDE for TON, now in your pocket.
     }
 
     async function handleSendMessage(chatId, target, type, contractName, args) {
+        if (DEBUG_MODE) console.log(`[INFO] Bot interaction (handleSendMessage): ${type} for ${contractName} to ${target}`);
         const abiPath = path.join(BUILD_DIR, `${contractName}.abi`);
         if (!fs.existsSync(abiPath)) throw new Error(`ABI not found for ${contractName}`);
         
@@ -1256,13 +1323,23 @@ The professional IDE for TON, now in your pocket.
             const endpoint = await getEndpoint();
             const client = new TonClient({ endpoint });
             const contract = client.open(devWallet);
-            let s = 0; try { s = await contract.getSeqno(); } catch (e) {}
+            let s = 0;
+            try {
+              s = await contract.getSeqno();
+            } catch (e) {
+              const msg = e.message || String(e);
+              if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+                  throw e;
+              }
+              if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
+            }
             await contract.sendTransfer({
                 seqno: s, secretKey: walletKey.secretKey,
                 messages: [internal({ to: Address.parse(target), value: '0.05', bounce: true, body })]
             });
             return s;
         });
+        console.log(`[INFO] Bot interaction OK: ${type} (seqno: ${seqno})`);
         bot.sendMessage(chatId, `✅ *Transaction Sent!*\nSeqno: \`${seqno}\``, { parse_mode: 'Markdown' });
     }
 
@@ -1323,6 +1400,7 @@ The professional IDE for TON, now in your pocket.
         };
 
         if (menuActions[text]) {
+            if (DEBUG_MODE) console.log(`[DEBUG] Bot message: "${text}" from ${chatId}`);
             return handleMenuAction(chatId, menuActions[text], msg);
         }
 
@@ -1347,6 +1425,8 @@ The professional IDE for TON, now in your pocket.
                 return bot.sendMessage(chatId, `❌ No deployed contract has type \`${typeOrMethod}\`.`, { parse_mode: 'Markdown' });
             }
 
+            if (DEBUG_MODE) console.log(`[DEBUG] Bot message: "${text}" from ${chatId}`);
+
             try {
                 if (isCall) {
                     const args = jsonStr ? JSON.parse(jsonStr) : [];
@@ -1356,6 +1436,8 @@ The professional IDE for TON, now in your pocket.
                     await handleSendMessage(chatId, state.deployed[contractName], typeOrMethod, contractName, args);
                 }
             } catch (e) {
+                console.error(`[ERROR] Bot command error`);
+                console.error(e);
                 bot.sendMessage(chatId, `❌ *Error:* ${escapeMarkdownV2(e.message)}`, { parse_mode: 'MarkdownV2' });
             }
             return;
@@ -1392,7 +1474,16 @@ The professional IDE for TON, now in your pocket.
                         const endpoint = await getEndpoint();
                         const client = new TonClient({ endpoint });
                         const contract = client.open(devWallet);
-                        let s = 0; try { s = await contract.getSeqno(); } catch (e) {}
+                        let s = 0;
+                        try {
+                          s = await contract.getSeqno();
+                        } catch (e) {
+                          const msg = e.message || String(e);
+                          if (msg.includes('ENOTFOUND') || msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.toLowerCase().includes('timeout')) {
+                              throw e;
+                          }
+                          if (DEBUG_MODE) console.warn(`[WARN] getSeqno failed (non-RPC), assuming 0: ${msg}`);
+                        }
                         await contract.sendTransfer({
                             seqno: s, secretKey: walletKey.secretKey,
                             messages: [internal({ to: Address.parse(target), value, bounce: true, body })]
@@ -1403,12 +1494,14 @@ The professional IDE for TON, now in your pocket.
                 } catch (e) { bot.sendMessage(chatId, `❌ *Failed:* ${e.message}`); }
             }
             else if (stateData.action === 'awaiting_args') {
+                if (DEBUG_MODE) console.log(`[DEBUG] Bot message: "${text}" from ${chatId}`);
                 const args = JSON.parse(msg.text);
                 const { target, type, contractName } = stateData;
                 clearUserState(chatId);
                 await handleSendMessage(chatId, target, type, contractName, args);
             } 
             else if (stateData.action === 'awaiting_getter_args') {
+                if (DEBUG_MODE) console.log(`[DEBUG] Bot message: "${text}" from ${chatId}`);
                 const args = JSON.parse(msg.text);
                 const { target, method, contractName } = stateData;
                 clearUserState(chatId);
@@ -1452,16 +1545,16 @@ The professional IDE for TON, now in your pocket.
       }
     });
   } else {
-    console.log('\x1b[33m[!] TELEGRAM_BOT_TOKEN not found — bot mode disabled.\x1b[0m');
+    console.log('[WARN] TELEGRAM_BOT_TOKEN not found — bot mode disabled.');
   }
 
   const graceful = sig => {
-    console.log(`\n\x1b[33m[*] ${sig} received — graceful shutdown (5s timeout)...\x1b[0m`);
-    server.close(() => { console.log('\x1b[32m[+] Server closed cleanly.\x1b[0m'); process.exit(0); });
-    setTimeout(() => { console.error('\x1b[31m[!] Forced exit after timeout.\x1b[0m'); process.exit(1); }, 5000);
+    console.log(`\n[INFO] [*] ${sig} received — graceful shutdown (5s timeout)...`);
+    server.close(() => { console.log('[INFO] [+] Server closed cleanly.'); process.exit(0); });
+    setTimeout(() => { console.error('[ERROR] [!] Forced exit after timeout.'); process.exit(1); }, 5000);
   };
   process.on('SIGINT',  () => graceful('SIGINT'));
   process.on('SIGTERM', () => graceful('SIGTERM'));
-  process.on('uncaughtException',  e => { console.error('\x1b[31m[UNCAUGHT]\x1b[0m', e); process.exit(1); });
-  process.on('unhandledRejection', r => console.error('\x1b[31m[REJECTION]\x1b[0m', r));
+  process.on('uncaughtException',  e => { console.error('[ERROR] [UNCAUGHT]', e); process.exit(1); });
+  process.on('unhandledRejection', r => console.error('[ERROR] [REJECTION]', r));
 });
