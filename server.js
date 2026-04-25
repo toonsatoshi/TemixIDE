@@ -26,13 +26,13 @@ const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 const PORT        = parseInt(process.env.TACT_PORT    || '3000', 10);
 const BOT_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
+const CHANNEL_ID  = process.env.TELEGRAM_CHANNEL_ID ? String(process.env.TELEGRAM_CHANNEL_ID).trim() : '';
 const ENV         = process.env.TACT_ENV     || 'development';
 const NETWORK     = process.env.TACT_NETWORK || 'testnet';
 const IS_TESTNET  = NETWORK === 'testnet';
 const LOG_DIR     = path.resolve(__dirname, 'logs');
 const WALLET_FILE = path.join(__dirname, 'dev-wallet.json');
 const BUILD_DIR   = path.join(__dirname, 'build');
-const CHANNEL_ID   = '-1003974357101';
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
 // ─── App & WebSocket ─────────────────────────────────────────────────────
@@ -46,17 +46,22 @@ const wsBroadcast = (type, data) => {
 };
 
 const escapeMarkdownV2 = (str) => {
-  return str.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+  return String(str || '').replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 };
 
-const escapeMarkdown = (str) => {
-  return String(str || '').replace(/[_*`\[]/g, '\\$&');
+const formatMarkdownV2Link = (label, url) => {
+  // Escape only the label and keep markdown structure/URL intact for Telegram parser.
+  return `[${escapeMarkdownV2(label)}](${encodeURI(url)})`;
 };
+
+let pollingBotInstance = null;
+let broadcastBotInstance = null;
 
 const broadcastToChannel = async (message) => {
-  if (!BOT_TOKEN) return;
+  if (!BOT_TOKEN || !CHANNEL_ID) return;
   try {
-    const bot = new TelegramBot(BOT_TOKEN);
+    // Reuse one bot instance instead of creating a new connection per broadcast.
+    const bot = pollingBotInstance || (broadcastBotInstance ||= new TelegramBot(BOT_TOKEN, { polling: false }));
     await bot.sendMessage(CHANNEL_ID, message, { parse_mode: 'MarkdownV2' });
   } catch (e) {
     console.error(`[Broadcast Error] ${e.message}`);
@@ -89,6 +94,7 @@ let devWallet = null, tonClient = null, walletKey = null, initialized = false;
 const txHistory = [];
 const MAX_TX    = 50;
 const STATE_FILE = path.join(__dirname, 'state.json');
+let compileQueue = Promise.resolve();
 
 let state = {
   deployed: {}, // { contractName: address }
@@ -118,7 +124,7 @@ async function withRetry(fn, retries = 10) {
     } catch (e) {
       lastErr = e;
       const msg = e.message || String(e);
-      const isRetryable = msg.includes('502') || msg.includes('500') || msg.includes('429') || msg.includes('404') || 
+      const isRetryable = msg.includes('502') || msg.includes('500') || msg.includes('429') || 
                           msg.includes('ECONNRESET') || msg.includes('ENOTFOUND') || msg.includes('ETIMEDOUT') ||
                           msg.toLowerCase().includes('timeout') || 
                           msg.includes('getseqno') || msg.includes('execution reversed');
@@ -134,6 +140,13 @@ async function withRetry(fn, retries = 10) {
     }
   }
   throw lastErr;
+}
+
+function queueCompileTask(task) {
+  // Serialize compiler access to prevent contract.tact race/corruption between concurrent requests.
+  const run = compileQueue.then(task, task);
+  compileQueue = run.catch(() => {});
+  return run;
 }
 
 async function getEndpoint() {
@@ -162,6 +175,9 @@ async function getEndpoint() {
 // ─── Initialization ──────────────────────────────────────────────────────
 async function init() {
   try {
+    if (!CHANNEL_ID) {
+      console.warn('\x1b[33m[!] TELEGRAM_CHANNEL_ID not set — channel broadcast disabled.\x1b[0m');
+    }
     let mnemonic;
     if (fs.existsSync(WALLET_FILE)) {
       const w = JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
@@ -186,7 +202,7 @@ async function init() {
     console.log(`\x1b[1mEnv:\x1b[0m      \x1b[36m${ENV}\x1b[0m\n`);
 
     // Test broadcast
-    broadcastToChannel(`🚀 *Temix IDE:* Connection Live for Channel Broadcasting`);
+    broadcastToChannel(`🚀 *${escapeMarkdownV2('Temix IDE')}:* ${escapeMarkdownV2('Connection Live for Channel Broadcasting')}`);
   } catch (e) {
     console.error('\x1b[31m[FATAL] Initialization failed:\x1b[0m', e.message);
     process.exit(1);
@@ -238,17 +254,25 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
   if (code.length > 500000) return res.status(413).json({ error: 'Source exceeds 500 KB limit.' });
   const id = req.requestId;
   try {
-    console.log(`\x1b[34m[${id}] Compiling Tact contract (${code.length} chars)...\x1b[0m`);
-    wsBroadcast('log', `[${id}] Compilation started`);
-    fs.writeFileSync('contract.tact', code, 'utf8');
-    const t0  = Date.now();
-    const out = execSync('npx tact --config tact.config.json 2>&1', { stdio: 'pipe', timeout: 60000 });
-    const dur = Date.now() - t0;
-    const log = out.toString();
-    wsBroadcast('compile-success', `Compiled in ${dur}ms`);
-    fs.appendFileSync(path.join(LOG_DIR, 'compile.log'), `[${new Date().toISOString()}] OK (${dur}ms)\n${log}\n---\n`);
-    console.log(`\x1b[32m[${id}] Compilation OK in ${dur}ms\x1b[0m`);
-    res.json({ success: true, duration: dur, log, artifacts: fs.existsSync(BUILD_DIR) ? fs.readdirSync(BUILD_DIR) : [] });
+    queueCompileTask(async () => {
+      console.log(`\x1b[34m[${id}] Compiling Tact contract (${code.length} chars)...\x1b[0m`);
+      wsBroadcast('log', `[${id}] Compilation started`);
+      fs.writeFileSync('contract.tact', code, 'utf8');
+      const t0  = Date.now();
+      const out = execSync('npx tact --config tact.config.json 2>&1', { stdio: 'pipe', timeout: 60000 });
+      const dur = Date.now() - t0;
+      const log = out.toString();
+      wsBroadcast('compile-success', `Compiled in ${dur}ms`);
+      fs.appendFileSync(path.join(LOG_DIR, 'compile.log'), `[${new Date().toISOString()}] OK (${dur}ms)\n${log}\n---\n`);
+      console.log(`\x1b[32m[${id}] Compilation OK in ${dur}ms\x1b[0m`);
+      res.json({ success: true, duration: dur, log, artifacts: fs.existsSync(BUILD_DIR) ? fs.readdirSync(BUILD_DIR) : [] });
+    }).catch((e) => {
+      const errLog = e.stdout ? e.stdout.toString() : e.message;
+      wsBroadcast('compile-error', errLog);
+      fs.appendFileSync(path.join(LOG_DIR, 'compile.log'), `[${new Date().toISOString()}] FAIL\n${errLog}\n---\n`);
+      console.error(`\x1b[31m[${id}] Compile FAILED\x1b[0m`);
+      res.status(400).json({ error: errLog });
+    });
   } catch (e) {
     const errLog = e.stdout ? e.stdout.toString() : e.message;
     wsBroadcast('compile-error', errLog);
@@ -372,7 +396,7 @@ app.post('/api/deploy', heavyLimiter, requireInit, async (req, res) => {
         `📦 *Contract:* \`${escapeMarkdownV2(baseName)}\`\n` +
         `⛓️ *Network:* ${escapeMarkdownV2(NETWORK.toUpperCase())}\n` +
         `📍 *Address:* \`${escapeMarkdownV2(addrStr)}\`\n` +
-        `🔗 [View on Explorer](${escapeMarkdownV2(explorerUrl)})`;
+        `🔗 ${formatMarkdownV2Link('View on Explorer', explorerUrl)}`;
     broadcastToChannel(broadcastMsg);
 
     res.json({ address: addrStr, network: NETWORK, seqno, explorerUrl });
@@ -393,7 +417,7 @@ function packField(builder, field, value) {
 
   switch (typeName) {
     case 'int':
-    case 'uint':
+    case 'uint': {
       const bits = typeof format === 'number' ? format : (format === 'coins' ? 124 : 257);
       if (format === 'coins') {
           builder.storeCoins(BigInt(value));
@@ -402,14 +426,17 @@ function packField(builder, field, value) {
           else builder.storeInt(BigInt(value), bits);
       }
       break;
-    case 'address':
+    }
+    case 'address': {
       builder.storeAddress(Address.parse(value));
       break;
-    case 'bool':
+    }
+    case 'bool': {
       builder.storeBit(value === true || value === 'true' || value === '1');
       break;
+    }
     case 'slice':
-    case 'cell':
+    case 'cell': {
       // Basic support: assume hex string if it looks like one, or empty
       if (!value) {
           if (typeName === 'cell') builder.storeRef(beginCell().endCell());
@@ -419,6 +446,7 @@ function packField(builder, field, value) {
           else builder.storeSlice(cell.beginParse());
       }
       break;
+    }
     default:
       throw new Error(`Unsupported type: ${typeName}`);
   }
@@ -554,7 +582,11 @@ app.get('/api/file', (req, res) => {
   const { name } = req.query;
   if (!name || !name.endsWith('.tact')) return res.status(400).json({ error: 'Invalid file name.' });
   try {
-    const filePath = path.join(__dirname, name);
+    const filePath = path.resolve(__dirname, String(name));
+    // Prevent path traversal outside repository root.
+    if (!filePath.startsWith(__dirname + path.sep)) {
+      return res.status(403).json({ error: 'Forbidden file path.' });
+    }
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found.' });
     const content = fs.readFileSync(filePath, 'utf8');
     res.json({ name, content });
@@ -575,6 +607,7 @@ init().then(() => {
   // ─── Telegram Bot Integration ──────────────────────────────────────────
   if (BOT_TOKEN) {
     const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+    pollingBotInstance = bot;
     console.log('\x1b[32m[+] Telegram Bot (TemixIDE) active.\x1b[0m');
 
     const isAuthorized = (msg) => {
@@ -594,7 +627,34 @@ init().then(() => {
       parse_mode: 'HTML'
     });
 
-    const userState = {}; // { chatId: { action: 'awaiting_args', target, method, type, contractName } }
+    const userState = {}; // { chatId: { action, ..., updatedAt } }
+    const USER_STATE_TTL_MS = 5 * 60 * 1000;
+
+    const setUserState = (chatId, data) => {
+      userState[chatId] = { ...data, updatedAt: Date.now() };
+    };
+    const clearUserState = (chatId) => {
+      delete userState[chatId];
+    };
+    const getUserState = (chatId) => {
+      const entry = userState[chatId];
+      if (!entry) return null;
+      if ((Date.now() - entry.updatedAt) > USER_STATE_TTL_MS) {
+        clearUserState(chatId);
+        return null;
+      }
+      return entry;
+    };
+
+    const userStateSweeper = setInterval(() => {
+      const now = Date.now();
+      for (const [chatId, entry] of Object.entries(userState)) {
+        if ((now - entry.updatedAt) > USER_STATE_TTL_MS) {
+          delete userState[chatId];
+        }
+      }
+    }, 60_000);
+    userStateSweeper.unref();
 
     bot.onText(/\/start|\/menu/, (msg) => {
       if (!isAuthorized(msg)) return bot.sendMessage(msg.chat.id, "🚫 Unauthorized.");
@@ -776,7 +836,7 @@ The professional IDE for TON, now in your pocket.
         }
 
         else if (data === 'prep_manual_int') {
-          userState[chatId] = { action: 'awaiting_manual_target' };
+          setUserState(chatId, { action: 'awaiting_manual_target' });
           await bot.sendMessage(chatId, "🎯 <b>Enter target contract address:</b>", { parse_mode: 'HTML' });
         }
 
@@ -930,38 +990,17 @@ The professional IDE for TON, now in your pocket.
         if (data.startsWith('do_compile:')) {
           const fileName = data.split(':')[1];
           bot.sendMessage(chatId, `🔨 <b>Compiling ${fileName}...</b>`, { parse_mode: 'HTML' });
-          try {
-            fs.writeFileSync('contract.tact', fs.readFileSync(path.join(__dirname, fileName))); // Update main target
+          queueCompileTask(async () => {
+            fs.writeFileSync('contract.tact', fs.readFileSync(path.join(__dirname, fileName))); // guarded by queueCompileTask
             state.lastFile = fileName; saveState();
             const t0 = Date.now();
             execSync('npx tact --config tact.config.json 2>&1', { stdio: 'pipe', timeout: 60000 });
             const dur = Date.now() - t0;
             const artifacts = fs.existsSync(BUILD_DIR) ? fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.code.boc')) : [];
             bot.sendMessage(chatId, `✅ <b>Compiled ${fileName} in ${dur}ms</b>\n\n<b>Artifacts:</b> ${artifacts.map(a => `<code>${a.replace('.code.boc','')}</code>`).join(', ')}`, { parse_mode: 'HTML' });
-          } catch (e) {
+          }).catch((e) => {
             const err = e.stdout ? e.stdout.toString() : e.message;
             bot.sendMessage(chatId, `❌ <b>Compilation Failed</b>\n\n<pre>${err.slice(0, 3000)}</pre>`, { parse_mode: 'HTML' });
-          }
-        }
-
-        else if (data === 'deploy_menu') {
-          if (!fs.existsSync(BUILD_DIR)) return bot.sendMessage(chatId, "❌ No builds found. Compile first.");
-          const files = fs.readdirSync(BUILD_DIR).filter(f => f.endsWith('.code.boc'));
-          if (files.length === 0) return bot.sendMessage(chatId, "❌ No compiled artifacts found.");
-
-          bot.editMessageText("🚀 <b>Select contract to deploy:</b>", {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: {
-              inline_keyboard: [
-                ...files.map(f => {
-                  const name = f.replace('.code.boc', '');
-                  return [{ text: `📦 ${name}`, callback_data: `do_deploy:${name}` }];
-                }),
-                [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ]
-            },
-            parse_mode: 'HTML'
           });
         }
 
@@ -994,37 +1033,6 @@ The professional IDE for TON, now in your pocket.
           } catch (e) {
             bot.sendMessage(chatId, "❌ <b>Deployment Failed</b>\n\n" + e.message);
           }
-        }
-
-        else if (data === 'interact_menu') {
-          const contracts = Object.keys(state.deployed);
-
-          bot.editMessageText("🎮 <b>Select contract to interact with:</b>", {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: {
-              inline_keyboard: [
-                ...contracts.map(c => [{ text: `🕹 ${c}`, callback_data: `int_methods:${c}` }]),
-                [{ text: '🎯 Manual Address', callback_data: 'prep_manual_int' }],
-                [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ]
-            },
-            parse_mode: 'HTML'
-          });
-        }
-
-        else if (data === 'prep_manual_int') {
-          userState[chatId] = { action: 'awaiting_manual_target' };
-          bot.sendMessage(chatId, "🎯 <b>Enter target contract address:</b>", { parse_mode: 'HTML' });
-        }
-
-        else if (data === 'health_check') {
-          const health = {
-            status: 'Operational', version: '2.0.0', uptime: Math.floor(process.uptime()) + 's',
-            memory: (process.memoryUsage().rss / 1024 / 1024).toFixed(2) + ' MB',
-            network: NETWORK, wallet: devWallet.address.toString({ testOnly: IS_TESTNET })
-          };
-          bot.sendMessage(chatId, `🏥 <b>System Health</b>\n\n<pre>${JSON.stringify(health, null, 2)}</pre>`, { parse_mode: 'HTML' });
         }
 
         else if (data.startsWith('int_methods:')) {
@@ -1078,7 +1086,7 @@ The professional IDE for TON, now in your pocket.
               const abi = JSON.parse(fs.readFileSync(path.join(BUILD_DIR, `${name}.abi`), 'utf8'));
               const typeDef = abi.types.find(t => t.name === type);
               if (typeDef && typeDef.fields && typeDef.fields.length > 0) {
-                  userState[chatId] = { action: 'awaiting_args', target: addr, type, contractName: name };
+                  setUserState(chatId, { action: 'awaiting_args', target: addr, type, contractName: name });
                   const fields = typeDef.fields.map(f => `\`${f.name}\` (${f.type.type})`).join('\n');
                   const jsonExample = `{\n  ${typeDef.fields.map(f => `"${f.name}": ...`).join(',\n  ')}\n}`;
                   const cmdExample = `/send_${type} {\n  ${typeDef.fields.map(f => `"${f.name}": 0`).join(',\n  ')}\n}`;
@@ -1106,23 +1114,6 @@ The professional IDE for TON, now in your pocket.
                   } catch (e) { bot.sendMessage(chatId, `❌ *Failed:* ${e.message}`); }
               }
           }
-        }
-
-        else if (data === 'getters_menu') {
-          const contracts = Object.keys(state.deployed);
-          if (contracts.length === 0) return bot.sendMessage(chatId, "❌ No deployed contracts. Deploy one first!");
-
-          bot.editMessageText("🔍 *Select contract to query:*", {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: {
-              inline_keyboard: [
-                ...contracts.map(c => [{ text: `📜 ${c}`, callback_data: `get_methods:${c}` }]),
-                [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ]
-            },
-            parse_mode: 'Markdown'
-          });
         }
 
         else if (data.startsWith('get_methods:')) {
@@ -1153,7 +1144,7 @@ The professional IDE for TON, now in your pocket.
           const getterDef = abi.getters.find(g => g.name === method);
           
           if (getterDef && getterDef.arguments && getterDef.arguments.length > 0) {
-              userState[chatId] = { action: 'awaiting_getter_args', target: addr, method, contractName: name };
+              setUserState(chatId, { action: 'awaiting_getter_args', target: addr, method, contractName: name });
               const args = getterDef.arguments.map(a => `\`${a.name}\` (${a.type.type})`).join('\n');
               const jsonExample = `[${getterDef.arguments.map(() => '...').join(', ')}]`;
               const cmdExample = `/call_get_${method} [${getterDef.arguments.map(() => '0').join(', ')}]`;
@@ -1176,48 +1167,22 @@ The professional IDE for TON, now in your pocket.
                 bot.sendMessage(chatId, `❌ *Call Failed:* ${e.message}`);
               }
           }
-          bot.answerCallbackQuery(query.id);
-        }
-
-        else if (data === 'files_list') {
-          const files = fs.readdirSync(__dirname).filter(f => f.endsWith('.tact'));
-          bot.editMessageText(`📁 *Project Files:* (Total: ${files.length})`, {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: { 
-              inline_keyboard: [
-                ...files.map(f => [{ text: `📄 ${f}`, callback_data: `view_file:${f}` }]),
-                [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ] 
-            },
-            parse_mode: 'Markdown'
-          });
         }
 
         else if (data.startsWith('view_file:')) {
           const fileName = data.split(':')[1];
           try {
-            const content = fs.readFileSync(path.join(__dirname, fileName), 'utf8');
+            const filePath = path.resolve(__dirname, fileName);
+            // Prevent path traversal from callback payload tampering.
+            if (!filePath.startsWith(__dirname + path.sep)) {
+              return bot.sendMessage(chatId, "❌ Forbidden file path.");
+            }
+            const content = fs.readFileSync(filePath, 'utf8');
             bot.sendMessage(chatId, `📄 *File:* \`${fileName}\`\n\n\`\`\`tact\n${content.slice(0, 3900)}\n\`\`\``, {
               parse_mode: 'Markdown',
               reply_markup: { inline_keyboard: [[{ text: '🔨 Compile', callback_data: `do_compile:${fileName}` }]] }
             });
           } catch (e) { bot.sendMessage(chatId, "❌ Error reading file."); }
-        }
-
-        else if (data === 'logs_menu') {
-          bot.editMessageText("📜 *Select log to view:*", {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🔨 Compiler Logs', callback_data: 'view_log:compile.log' }],
-                [{ text: '🌐 Access Logs', callback_data: 'view_log:access.log' }],
-                [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ]
-            },
-            parse_mode: 'Markdown'
-          });
         }
 
         else if (data.startsWith('view_log:')) {
@@ -1229,24 +1194,6 @@ The professional IDE for TON, now in your pocket.
             const lines = content.split('\n').slice(-20).join('\n'); // Last 20 lines
             bot.sendMessage(chatId, `📜 *Last 20 lines of* \`${logFile}\`*:*\n\n\`\`\`\n${lines || '(empty)'}\n\`\`\``, { parse_mode: 'Markdown' });
           } catch (e) { bot.sendMessage(chatId, "❌ Error reading log."); }
-        }
-
-        else if (data === 'artifacts_menu') {
-          if (!fs.existsSync(BUILD_DIR)) return bot.sendMessage(chatId, "❌ No build directory found.");
-          const files = fs.readdirSync(BUILD_DIR);
-          if (files.length === 0) return bot.sendMessage(chatId, "❌ No artifacts found.");
-          
-          bot.editMessageText("📦 *Build Artifacts:*", {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: {
-              inline_keyboard: [
-                ...files.slice(0, 10).map(f => [{ text: `📄 ${f}`, callback_data: `view_art:${f}` }]),
-                [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ]
-            },
-            parse_mode: 'Markdown'
-          });
         }
 
         else if (data.startsWith('view_art:')) {
@@ -1265,19 +1212,7 @@ The professional IDE for TON, now in your pocket.
           } catch (e) { bot.sendMessage(chatId, "❌ Error reading artifact."); }
         }
 
-        else if (data === 'history') {
-          const text = txHistory.length > 0 
-            ? `📋 *Recent Transactions:*\n\n${txHistory.slice(0, 10).map(t => `• *\`${t.type}\`* \`${t.target || t.address}\` \n  _${new Date(t.ts).toLocaleTimeString()}_`).join('\n\n')}`
-            : "📋 No transactions in history.";
-          
-          bot.editMessageText(text, {
-            chat_id: chatId,
-            message_id: query.message.message_id,
-            reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'menu' }]] },
-            parse_mode: 'Markdown'
-          });
-        }
-        
+
       } catch (e) {
         console.error('[Bot Callback Error]', e);
         bot.answerCallbackQuery(query.id, { text: "Error: " + e.message, show_alert: true });
@@ -1366,7 +1301,7 @@ The professional IDE for TON, now in your pocket.
     // Handle User Input for Arguments
     bot.on('message', async (msg) => {
         const chatId = msg.chat.id;
-        const stateData = userState[chatId];
+        const stateData = getUserState(chatId);
         let text = msg.text ? msg.text.trim() : '';
 
         // Map reply keyboard buttons to actions
@@ -1406,7 +1341,10 @@ The professional IDE for TON, now in your pocket.
             // Search for correct contract
             let contractName = stateData ? stateData.contractName : null;
             if (!contractName || (isCall ? !hasGetter(contractName, typeOrMethod) : !hasType(contractName, typeOrMethod))) {
-                contractName = contracts.find(c => isCall ? hasGetter(c, typeOrMethod) : hasType(c, typeOrMethod)) || contracts[0];
+                contractName = contracts.find(c => isCall ? hasGetter(c, typeOrMethod) : hasType(c, typeOrMethod));
+            }
+            if (!contractName) {
+                return bot.sendMessage(chatId, `❌ No deployed contract has type \`${typeOrMethod}\`.`, { parse_mode: 'Markdown' });
             }
 
             try {
@@ -1418,7 +1356,7 @@ The professional IDE for TON, now in your pocket.
                     await handleSendMessage(chatId, state.deployed[contractName], typeOrMethod, contractName, args);
                 }
             } catch (e) {
-                bot.sendMessage(chatId, `❌ *Error:* ${escapeMarkdown(e.message)}`, { parse_mode: 'Markdown' });
+                bot.sendMessage(chatId, `❌ *Error:* ${escapeMarkdownV2(e.message)}`, { parse_mode: 'MarkdownV2' });
             }
             return;
         }
@@ -1430,7 +1368,7 @@ The professional IDE for TON, now in your pocket.
                 const target = msg.text.trim();
                 try {
                     Address.parse(target);
-                    userState[chatId] = { action: 'awaiting_manual_msg', target };
+                    setUserState(chatId, { action: 'awaiting_manual_msg', target });
                     bot.sendMessage(chatId, `🎯 *Target set:* \`${target}\`\n\nNow enter the message string (e.g., "increment") or a TON value + message (e.g., "0.05:increment"):`, { parse_mode: 'Markdown' });
                 } catch (e) {
                     bot.sendMessage(chatId, "❌ Invalid TON address. Try again or /menu to cancel.");
@@ -1445,7 +1383,7 @@ The professional IDE for TON, now in your pocket.
                     text = parts.slice(1).join(':');
                 }
                 const target = stateData.target;
-                delete userState[chatId];
+                clearUserState(chatId);
 
                 bot.sendMessage(chatId, `Sending "${text}" to ${target} (${value} TON)...`);
                 try {
@@ -1467,13 +1405,13 @@ The professional IDE for TON, now in your pocket.
             else if (stateData.action === 'awaiting_args') {
                 const args = JSON.parse(msg.text);
                 const { target, type, contractName } = stateData;
-                delete userState[chatId];
+                clearUserState(chatId);
                 await handleSendMessage(chatId, target, type, contractName, args);
             } 
             else if (stateData.action === 'awaiting_getter_args') {
                 const args = JSON.parse(msg.text);
                 const { target, method, contractName } = stateData;
-                delete userState[chatId];
+                clearUserState(chatId);
                 await handleCallGetter(chatId, target, method, contractName, args);
             } 
 

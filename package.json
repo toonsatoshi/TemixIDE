@@ -10,6 +10,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@orbs-network/ton-access": "^2.3.3",
     "@tact-lang/compiler": "^1.6.13",
