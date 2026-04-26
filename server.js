@@ -9,6 +9,7 @@ const fs           = require('fs');
 const path         = require('path');
 const http         = require('http');
 const os           = require('os');
+const crypto       = require('crypto');
 const { execSync } = require('child_process');
 const { TonClient, WalletContractV4, internal, Cell, contractAddress, beginCell, Address } = require('@ton/ton');
 const { mnemonicNew, mnemonicToPrivateKey } = require('@ton/crypto');
@@ -503,7 +504,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── State ────────────────────────────────────────────────────────────────
 let devWallet = null, tonClient = null, walletKey = null, initialized = false;
-const MAX_TX    = 50;
+const MAX_TX    = 10;
 const STATE_FILE = path.join(__dirname, 'state.json');
 const SESSIONS_DIR = path.resolve(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -759,6 +760,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+app.get('/api/wallet/seed', requireInit, (req, res) => {
+    if (!fs.existsSync(WALLET_FILE)) return res.status(404).json({ error: 'No wallet file.' });
+    try {
+        const w = JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
+        res.json({ mnemonic: Array.isArray(w.mnemonic) ? w.mnemonic.join(' ') : w.mnemonic });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/wallet', requireInit, async (req, res) => {
   try {
     logger.debug('Fetching wallet balance...', req.requestId);
@@ -832,9 +841,21 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
         wsBroadcast('compile-success', `Compiled in ${dur}ms`);
         fs.appendFileSync(path.join(logDir, 'compile.log'), `[${new Date().toISOString()}] OK (${dur}ms)\n${log}\n---\n`);
         logger.info(`Compilation OK in ${dur}ms`, id);
-        res.json({ success: true, duration: dur, log, artifacts: fs.existsSync(buildDir) ? fs.readdirSync(buildDir) : [] });
-      } finally {
-          if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
+
+        const artifacts = fs.existsSync(buildDir) ? fs.readdirSync(buildDir) : [];
+        const resData = { success: true, duration: dur, log, artifacts };
+
+        const bocFile = artifacts.find(f => f.endsWith('.code.boc'));
+        if (bocFile) {
+            try {
+                const boc = fs.readFileSync(path.join(buildDir, bocFile));
+                resData.bytecodeSize = boc.length;
+                resData.bytecodeHash = crypto.createHash('sha256').update(boc).digest('hex');
+            } catch (e) { logger.warn('Failed to read BOC for metrics', id, e); }
+        }
+
+        res.json(resData);
+        } finally {          if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
       }
     }).catch((e) => {
       const errLog = e.stdout ? e.stdout.toString() : e.message;
@@ -1176,7 +1197,12 @@ app.post('/api/interact', heavyLimiter, requireInit, async (req, res) => {
 
 function decodeStackItem(item, typeName) {
   if (!item) return null;
-  if (item.type === 'int') return item.value.toString();
+  if (item.type === 'int') {
+    const val = item.value;
+    return (val <= BigInt(Number.MAX_SAFE_INTEGER) && val >= BigInt(Number.MIN_SAFE_INTEGER)) 
+      ? Number(val) 
+      : val.toString();
+  }
   if (item.type === 'cell') {
     if (typeName === 'string') {
       try { return item.cell.beginParse().loadStringTail(); } catch (e) { return '[Invalid String Cell]'; }
@@ -1259,6 +1285,21 @@ app.post('/api/getter', heavyLimiter, requireInit, async (req, res) => {
 app.get('/api/tx-history', requireInit, (req, res) => {
   logger.debug('Fetching transaction history', req.requestId);
   res.json({ history: getSession().txHistory || [] });
+});
+
+app.delete('/api/session', requireInit, (req, res) => {
+  const session = getSession();
+  session.deployed = {};
+  session.txHistory = [];
+  const buildDir = getSessionBuildDir();
+  if (fs.existsSync(buildDir)) {
+      try {
+          fs.rmSync(buildDir, { recursive: true, force: true });
+          fs.mkdirSync(buildDir, { recursive: true });
+      } catch (e) { logger.error('Failed to clear build dir', '', e); }
+  }
+  saveState();
+  res.json({ success: true });
 });
 
 app.get('/api/artifacts', requireInit, (req, res) => {
@@ -1400,6 +1441,15 @@ The professional IDE for TON, now in your pocket.
       bot.sendMessage(msg.chat.id, welcome, { ...getMainMenu(), parse_mode: 'HTML' });
     });
 
+    bot.setMyCommands([
+        { command: 'menu', description: 'Show main menu' },
+        { command: 'compile', description: 'Compile .tact files' },
+        { command: 'deploy', description: 'Deploy compiled BOC' },
+        { command: 'wallet', description: 'Check wallet status' },
+        { command: 'history', description: 'View transaction history' },
+        { command: 'help', description: 'Show help guide' }
+    ]);
+
     const handleMenuAction = async (chatId, data, msgOrQuery) => {
       const isQuery = !!msgOrQuery.id;
       const messageId = isQuery ? msgOrQuery.message.message_id : null;
@@ -1510,30 +1560,50 @@ The professional IDE for TON, now in your pocket.
               return await client.getBalance(devWallet.address);
           });
           const addr = devWallet.address.toString({ testOnly: IS_TESTNET });
-          const text = `💳 *Wallet Status*\n\n*Address:* \`${addr}\`\n*Balance:* \`${(Number(balance) / 1e9).toFixed(4)} TON\`\n*Network:* ${NETWORK.toUpperCase()}`;
-          await sendOrEdit(text, { 
+          const text = `💳 *Wallet Status*\n\n*Address:* \`${addr}\`\n*Balance:* \`${(Number(balance) / 1e9).toFixed(4)} TON\`\n*Network:* ${NETWORK.toUpperCase()}\n\n*Note:* Balance may take a few seconds to update after transactions.`;
+          await sendOrEdit(text, {
             reply_markup: {
               inline_keyboard: [
+                [{ text: '🗝 View Seed Phrase', callback_data: 'view_seed' }],
                 [{ text: '🗑 Reset Wallet', callback_data: 'confirm_reset' }],
                 [{ text: '⬅️ Back', callback_data: 'menu' }]
-              ]
-            },
-            parse_mode: 'Markdown' 
-          });
-        }
-        
-        else if (data === 'confirm_reset') {
-          await sendOrEdit("⚠️ *Are you sure?*\nThis will backup and delete your current wallet. The server will need a restart.", {
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '✅ Yes, Reset', callback_data: 'do_reset' }],
-                [{ text: '❌ Cancel', callback_data: 'wallet' }]
               ]
             },
             parse_mode: 'Markdown'
           });
         }
 
+        else if (data === 'view_seed') {
+          if (!fs.existsSync(WALLET_FILE)) return bot.sendMessage(chatId, "❌ No wallet file found.");
+          const w = JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
+          const mnemonic = Array.isArray(w.mnemonic) ? w.mnemonic.join(' ') : w.mnemonic;
+          await bot.sendMessage(chatId, `⚠️ <b>SECURITY WARNING</b>\nYour seed phrase is the key to your wallet. Never share it!\n\n<code>${mnemonic}</code>\n\n<i>This message will self-destruct (not really, but please delete it after viewing).</i>`, { parse_mode: 'HTML' });
+        }
+
+        else if (data === 'confirm_reset') {
+          await sendOrEdit("⚠️ <b>Are you sure?</b>\nThis will discard your wallet and create a new one with 2 testnet TON (after funding). Continue?", {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '✅ Yes, Reset', callback_data: 'do_reset' }],
+                [{ text: '❌ Cancel', callback_data: 'wallet' }]
+              ]
+            },
+            parse_mode: 'HTML'
+          });
+        }
+
+        else if (data === 'do_confirmed_tx') {
+            const stateData = getUserState(chatId);
+            if (!stateData || !stateData.target) return bot.sendMessage(chatId, "❌ Session expired.");
+            const { target, method, type, contractName, args, action } = stateData;
+            clearUserState(chatId);
+
+            if (action === 'confirm_call') {
+                await handleCallGetter(chatId, target, method, contractName, args);
+            } else {
+                await handleSendMessage(chatId, target, type, contractName, args);
+            }
+        }
         else if (data === 'do_reset') {
           try {
             if (!fs.existsSync(WALLET_FILE)) throw new Error('No wallet file.');
@@ -1575,10 +1645,7 @@ The professional IDE for TON, now in your pocket.
               inline_keyboard: [
                 ...files.map(f => {
                   const name = f.replace('.code.boc', '');
-                  return [
-                    { text: `📦 ${name}`, callback_data: `do_deploy:${getShort(name)}` },
-                    { text: `📝 Init`, callback_data: `prep_manual_deploy:${getShort(name)}` }
-                  ];
+                  return [{ text: `🚀 Deploy ${name}`, callback_data: `prep_manual_deploy:${getShort(name)}` }];
                 }),
                 [{ text: '⬅️ Back', callback_data: 'menu' }]
               ]
@@ -1973,7 +2040,8 @@ The professional IDE for TON, now in your pocket.
                       return s;
                   });
                   logger.info(`Bot interaction OK: text "${text}" to ${name}`);
-                  bot.sendMessage(chatId, `✅ *Transaction Sent!*\nSeqno: \`${seqno}\``, { parse_mode: 'Markdown' });
+                  const explorerUrl = `https://${IS_TESTNET?'testnet.':''}tonscan.org/search?q=${seqno}`;
+                  bot.sendMessage(chatId, `✅ <b>Transaction Sent!</b>\nSeqno: <code>${seqno}</code>\n<a href="${explorerUrl}">View on Explorer</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
               } catch (e) { 
                 logger.error(`Bot interaction FAIL: text "${text}"`, '', e);
                 bot.sendMessage(chatId, `❌ *Failed:* ${e.message}`); 
@@ -2024,7 +2092,8 @@ The professional IDE for TON, now in your pocket.
                           return s;
                       });
                       logger.info(`Bot interaction OK: type ${type} to ${name}`);
-                      bot.sendMessage(chatId, `✅ *Transaction Sent!*\nSeqno: \`${seqno}\``, { parse_mode: 'Markdown' });
+                      const explorerUrl = `https://${IS_TESTNET?'testnet.':''}tonscan.org/search?q=${seqno}`;
+                      bot.sendMessage(chatId, `✅ <b>Transaction Sent!</b>\nSeqno: <code>${seqno}</code>\n<a href="${explorerUrl}">View on Explorer</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
                   } catch (e) { 
                     logger.error(`Bot interaction FAIL: type ${type}`, '', e);
                     bot.sendMessage(chatId, `❌ *Failed:* ${e.message}`); 
@@ -2104,15 +2173,32 @@ The professional IDE for TON, now in your pocket.
               return bot.sendMessage(chatId, "❌ Forbidden file path.");
             }
             if (!fs.existsSync(filePath)) return bot.sendMessage(chatId, "❌ File not found in session.");
-            
+
             const content = fs.readFileSync(filePath, 'utf8');
             bot.sendMessage(chatId, `📄 *File:* \`${fileName}\`\n\n\`\`\`tact\n${content.slice(0, 3900)}\n\`\`\``, {
               parse_mode: 'Markdown',
-              reply_markup: { inline_keyboard: [[{ text: '🔨 Compile', callback_data: `do_compile:${getShort(fileName)}` }]] }
+              reply_markup: { 
+                inline_keyboard: [[
+                  { text: '🔨 Compile', callback_data: `do_compile:${getShort(fileName)}` },
+                  { text: '✨ AI Explain', callback_data: `ai_explain_file:${getShort(fileName)}` }
+                ]] 
+              }
             });
           } catch (e) { logger.error('Bot view file fail', '', e); bot.sendMessage(chatId, "❌ Error reading file."); }
         }
 
+        else if (data.startsWith('ai_explain_file:')) {
+          const fileName = getLong(data.split(':')[1]);
+          const sessionPath = getSessionPath();
+          try {
+            const filePath = path.join(sessionPath, fileName);
+            if (!fs.existsSync(filePath)) throw new Error("File not found.");
+            const code = fs.readFileSync(filePath, 'utf8');
+            bot.sendMessage(chatId, "🤖 <b>AI is analyzing the source file...</b>", { parse_mode: 'HTML' });
+            const explanation = await generateAIExplanation("Explain this Tact source file.", code);
+            bot.sendMessage(chatId, `📖 <b>Explanation for ${fileName}</b>\n\n${explanation}`, { parse_mode: 'HTML' });
+          } catch (e) { bot.sendMessage(chatId, "❌ Error analyzing file: " + e.message); }
+        }
         else if (data.startsWith('view_log:')) {
           const logFile = getLong(data.split(':')[1]);
           const logPath = path.join(getSessionLogDir(), logFile);
@@ -2194,7 +2280,36 @@ The professional IDE for TON, now in your pocket.
                     ? `The contract failed with exit code ${errCode}. Analyze the code and explain why this might have happened and how to fix it.`
                     : "Explain how this contract works and what I can do with it.";
                 
-                const explanation = await generateAIExplanation(prompt, code);
+                let explanation = await generateAIExplanation(prompt, code);
+                
+                // Make contract terms tappable
+                try {
+                    const buildDir = getSessionBuildDir();
+                    const abiPath = path.join(buildDir, `${name}.abi`);
+                    if (fs.existsSync(abiPath)) {
+                        const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+                        const receivers = abi.receivers || [];
+                        const getters = abi.getters || [];
+                        
+                        receivers.forEach(r => {
+                            const label = r.message.type === 'text' ? r.message.text : r.message.type;
+                            if (label && label.length > 2) {
+                                const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                const regex = new RegExp(`\\b${escaped}\\b`, 'g');
+                                // Only replace if not already part of a command
+                                explanation = explanation.replace(regex, (match) => `<b>${match}</b> (<code>/send_${match}</code>)`);
+                            }
+                        });
+                        
+                        getters.forEach(g => {
+                            if (g.name && g.name.length > 2) {
+                                const regex = new RegExp(`\\b${g.name}\\b`, 'g');
+                                explanation = explanation.replace(regex, (match) => `<b>${match}</b> (<code>/call_get_${match}</code>)`);
+                            }
+                        });
+                    }
+                } catch (e) { logger.debug('Failed to enhance AI explanation with tappable terms', '', e); }
+
                 const title = isError ? `🔍 <b>AI Failure Analysis for ${name}</b>` : `📖 <b>AI Explanation for ${name}</b>`;
                 bot.sendMessage(chatId, `${title}\n\n${explanation}`, { parse_mode: 'HTML' });
             } catch (e) {
@@ -2326,7 +2441,8 @@ The professional IDE for TON, now in your pocket.
             return s;
         });
         logger.info(`Bot interaction OK: ${type} (seqno: ${seqno})`);
-        bot.sendMessage(chatId, `✅ *Transaction Sent!*\nSeqno: \`${seqno}\``, { parse_mode: 'Markdown' });
+        const explorerUrl = `https://${IS_TESTNET?'testnet.':''}tonscan.org/search?q=${seqno}`;
+        bot.sendMessage(chatId, `✅ <b>Transaction Sent!</b>\nSeqno: <code>${seqno}</code>\n<a href="${explorerUrl}">View on Explorer</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
     async function handleCallGetter(chatId, target, method, contractName, args) {
@@ -2455,13 +2571,32 @@ The professional IDE for TON, now in your pocket.
             if (!contractName) return bot.sendMessage(chatId, `❌ No deployed contract has type \`${typeOrMethod}\`.`, { parse_mode: 'Markdown' });
 
             try {
-                if (isCall) {
-                    const args = jsonStr ? safeJsonParse(jsonStr) : [];
-                    await handleCallGetter(chatId, session.deployed[contractName], typeOrMethod, contractName, args);
-                } else {
-                    const args = jsonStr ? safeJsonParse(jsonStr) : {};
-                    await handleSendMessage(chatId, session.deployed[contractName], typeOrMethod, contractName, args);
-                }
+                const args = jsonStr ? safeJsonParse(jsonStr) : (isCall ? [] : {});
+                setUserState(chatId, { 
+                    action: isCall ? 'confirm_call' : 'confirm_send',
+                    target: session.deployed[contractName],
+                    method: typeOrMethod,
+                    type: typeOrMethod,
+                    contractName: contractName,
+                    args: args
+                });
+
+                const confirmText = `⚠️ <b>Confirm ${isCall?'Call':'Message'}</b>\n\n` +
+                    `<b>Contract:</b> ${contractName}\n` +
+                    `<b>Action:</b> ${typeOrMethod}\n` +
+                    `<b>Target:</b> <code>${session.deployed[contractName]}</code>\n` +
+                    `<b>Arguments:</b> <pre>${JSON.stringify(args, null, 2)}</pre>\n\n` +
+                    `<i>Estimated gas: 0.02 TON</i>`;
+
+                await bot.sendMessage(chatId, confirmText, {
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: '✅ Confirm & Sign', callback_data: 'do_confirmed_tx' },
+                            { text: '❌ Cancel', callback_data: 'menu' }
+                        ]]
+                    },
+                    parse_mode: 'HTML'
+                });
             } catch (e) {
                 logger.error('Bot command error', '', e);
                 bot.sendMessage(chatId, `❌ *Error:* ${escapeMarkdownV2(e.message)}`, { parse_mode: 'MarkdownV2' });

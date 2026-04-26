@@ -63,8 +63,9 @@
     #scroll { flex: 1; overflow-y: auto; padding: 14px; }
 
     /* ── Sections ── */
-    .sec { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin: 16px 0 8px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; }
-    .card { background: var(--card); padding: 14px; border-radius: var(--r); margin-bottom: 10px; border: 1px solid var(--border); transition: var(--trans); }
+    .sec { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin: 16px 0 8px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; overflow: hidden; gap: 8px; }
+    .sec span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card { background: var(--card); padding: 14px; border-radius: var(--r); margin-bottom: 10px; border: 1px solid var(--border); transition: var(--trans); overflow: hidden; }
     .card:hover { border-color: #484f58; }
 
     /* ── Buttons ── */
@@ -180,7 +181,10 @@
         <div class="sec">Dev Wallet</div>
         <div class="card">
           <div class="wblock">
-            <div id="w-addr" onclick="copy(this.innerText)" title="Click to copy">Connecting...</div>
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+              <div id="w-addr" onclick="copy(this.innerText)" title="Click to copy" style="flex:1;">Connecting...</div>
+              <button class="btn btn-s btn-sm" onclick="copy(document.getElementById('w-addr').innerText)" style="margin-top:0; padding:2px 6px;">Copy</button>
+            </div>
             <div id="w-bal">– TON</div>
             <div id="w-meta">Network: —</div>
           </div>
@@ -242,6 +246,8 @@
           Wallet Actions <span style="font-size:10px;color:var(--danger-h);">⚠ Danger Zone</span>
         </div>
         <div class="card">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:7px;">Wipe all session state (artifacts, history, deployed addresses).</div>
+          <button class="btn btn-d btn-sm" onclick="newSession()" style="margin-bottom:12px; width:100%;">🆕 Start New Session</button>
           <div style="font-size:11px;color:var(--muted);margin-bottom:7px;">Backs up then deletes current wallet key file. Server restart required.</div>
           <button class="btn btn-d" onclick="resetWallet()">🗑 Reset &amp; Regenerate Wallet</button>
         </div>
@@ -385,11 +391,25 @@ async function loadWallet() {
     if (r.address) {
       document.getElementById('w-addr').innerText = r.address;
       document.getElementById('w-bal').innerText  = `${r.balance} TON`;
-      document.getElementById('w-meta').innerText = `Network: ${r.network} · ${r.walletVersion}`;
+      document.getElementById('w-meta').innerHTML = `Net: ${r.network} · ${r.walletVersion} · <a href="https://${r.network==='testnet'?'testnet.':''}tonscan.org/address/${r.address}" target="_blank">Explorer</a>`;
       document.getElementById('net-label').innerText = r.network;
       document.getElementById('sb-net').innerText    = r.network;
     }
   } catch(e) { con('Wallet sync failed: '+e.message,'error'); }
+}
+
+async function newSession() {
+  if (!confirm('This will wipe all artifacts and deployment history for the current session. Continue?')) return;
+  try {
+    const r = await fetch('/api/session',{method:'DELETE'}).then(x=>x.json());
+    if (r.success) {
+      toast('Session reset!','success');
+      deployedAddresses = {};
+      localStorage.removeItem('tfm-deployed');
+      loadArts(); loadContracts(); renderHist();
+      tab('forge');
+    }
+  } catch(e) { toast('Reset failed: '+e.message,'error'); }
 }
 
 async function resetWallet() {
@@ -408,10 +428,26 @@ async function compile() {
   try {
     const r = await fetch('/api/compile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:editor.getValue()})}).then(x=>x.json());
     if (r.success) {
+      const metrics = r.bytecodeSize ? ` (${(r.bytecodeSize/1024).toFixed(1)} KB, hash: ${r.bytecodeHash.slice(0,8)}...)` : '';
       toast(`✓ Built in ${r.duration}ms!`,'success');
-      con(`Build OK in ${r.duration}ms — artifacts: ${(r.artifacts||[]).join(', ')}`,'success');
+      con(`Build OK in ${r.duration}ms${metrics} — artifacts: ${(r.artifacts||[]).join(', ')}`,'success');
       document.getElementById('clog').innerText = r.log||'';
       document.getElementById('clog-wrap').style.display='block';
+      
+      const firstContract = (r.artifacts||[]).find(a => a.endsWith('.code.boc'));
+      if (firstContract) {
+          const name = firstContract.replace('.code.boc', '');
+          const btnId = 'quick-dep-btn';
+          if (document.getElementById(btnId)) document.getElementById(btnId).remove();
+          const btn = document.createElement('button');
+          btn.id = btnId;
+          btn.className = 'btn btn-p';
+          btn.style.marginTop = '10px';
+          btn.innerHTML = `🚀 Deploy ${name} Now`;
+          btn.onclick = () => { document.getElementById('contract-select').value = name; deploy(); };
+          document.getElementById('clog-wrap').appendChild(btn);
+      }
+      
       loadArts(); loadContracts(); tab('build');
     }
  else {
@@ -449,23 +485,39 @@ async function deploy() {
       toast('🚀 Deployed!','success'); con(`Deployed: ${r.address}`,'success');
       document.getElementById('t-addr').value = r.address;
       document.getElementById('dep-addr').innerText = r.address;
-      const el = document.getElementById('exp-link'); el.href = r.explorerUrl||'#';
+      const el = document.getElementById('exp-link'); el.href = r.explorerUrl||`https://${IS_TESTNET?'testnet.':''}tonscan.org/address/${r.address}`;
       document.getElementById('deploy-result').style.display='block';
       
+      const actionRowId = 'dep-actions';
+      if (document.getElementById(actionRowId)) document.getElementById(actionRowId).remove();
+      const actionRow = document.createElement('div');
+      actionRow.id = actionRowId;
+      actionRow.className = 'row';
+      actionRow.style.marginTop = '10px';
+      actionRow.innerHTML = `
+        <button class="btn btn-s btn-sm" onclick="quickInteract('${contractName}')">🎮 Interact</button>
+        <button class="btn btn-s btn-sm" onclick="quickGetters('${contractName}')">🔍 Getters</button>
+      `;
+      document.getElementById('deploy-result').appendChild(actionRow);
+
       // Save to deployedAddresses
       deployedAddresses[contractName] = r.address;
       localStorage.setItem('tfm-deployed', JSON.stringify(deployedAddresses));
       
       saveTx({type:'deploy',address:r.address,ts:new Date().toISOString(),seqno:r.seqno});
       setTimeout(loadWallet,3000); 
-      
-      // Switch to interact tab and select the contract
-      document.getElementById('i-contract-select').value = contractName;
-      loadContractABI();
-      tab('interact');
     } else { toast('Deploy failed: '+r.error,'error'); con('FAILED: '+r.error,'error'); }
   } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
   finally { setBtn('bd',false,LBL_D); }
+}
+
+function quickInteract(name) {
+    document.getElementById('i-contract-select').value = name;
+    loadContractABI();
+    tab('interact');
+}
+function quickGetters(name) {
+    quickInteract(name);
 }
 
 // ── Interact ─────────────────────────────────────────────────────────
@@ -503,7 +555,10 @@ async function callGetter() {
     }).then(x => x.json());
     
     if (r.success) {
-      resEl.innerText = `Result: ${JSON.stringify(r.stack)}`;
+      resEl.innerHTML = `<div class="tx" style="border-color:var(--success-t); margin-top:5px;">
+        <div class="tx-type" style="color:var(--success-t)">Result</div>
+        <div class="tx-addr" style="color:var(--text); font-size:13px;">${r.stack.map(s => `<div>${esc(String(s))}</div>`).join('')}</div>
+      </div>`;
       con(`Getter "${method}" on ${target}: ${JSON.stringify(r.stack)}`, 'success');
     } else {
       resEl.innerText = `Error: ${r.error}`;
@@ -515,17 +570,23 @@ async function callGetter() {
 
 // ── TX History ────────────────────────────────────────────────────────
 function saveTx(tx) {
-  hist.unshift(tx); if (hist.length>50) hist.pop();
-  localStorage.setItem('tfm-hist', JSON.stringify(hist)); renderHist();
+  // We mainly fetch from server now, but update locally for speed
+  hist.unshift(tx); if (hist.length>10) hist.pop();
+  renderHist();
 }
-function renderHist() {
+async function renderHist() {
+  try {
+    const r = await fetch('/api/tx-history').then(x=>x.json());
+    if (r.history) hist = r.history;
+  } catch(e) {}
+
   const el = document.getElementById('tx-list');
   if (!hist.length) { el.innerHTML='<div class="empty">No transactions yet.</div>'; return; }
   el.innerHTML = hist.map(t=>`
     <div class="tx">
       <div class="tx-type">${t.type}</div>
-      <div class="tx-addr">${esc(t.address||t.target||'')}${t.message?` · "${esc(t.message)}"`:''}</div>
-      <div class="tx-ts">${new Date(t.ts).toLocaleString()} · seqno: ${t.seqno??'—'}</div>
+      <div class="tx-addr">${esc(t.address||t.target||'')} ${t.message?` · "${esc(t.message)}"`:''}</div>
+      <div class="tx-ts">${new Date(t.ts).toLocaleString()} · seqno: ${t.seqno??'—'} · <a href="https://${IS_TESTNET?'testnet.':''}tonscan.org/search?q=${t.seqno}" target="_blank">Explorer</a></div>
     </div>`).join('');
 }
 function clearHist() { hist=[]; localStorage.removeItem('tfm-hist'); renderHist(); }
@@ -561,12 +622,12 @@ async function loadContracts() {
     const sel = document.getElementById('contract-select');
     const iSel = document.getElementById('i-contract-select');
     const options = r.contracts?.length 
-      ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')
+      ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c.replace(/^Target_/, ''))}</option>`).join('')
       : '<option value="">(Compile first)</option>';
     
     sel.innerHTML = options;
     iSel.innerHTML = '<option value="">(Select a contract)</option>' + (r.contracts?.length 
-      ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')
+      ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c.replace(/^Target_/, ''))}</option>`).join('')
       : '');
   } catch(e) { con('Contracts list failed: '+e.message,'error'); }
 }
@@ -740,7 +801,10 @@ async function callABIGetter(method) {
     }).then(x => x.json());
     
     if (r.success) {
-      resEl.innerText = `Result: ${JSON.stringify(r.stack)}`;
+      resEl.innerHTML = `<div class="tx" style="border-color:var(--success-t); margin-top:5px;">
+        <div class="tx-type" style="color:var(--success-t)">Result</div>
+        <div class="tx-addr" style="color:var(--text); font-size:13px;">${r.stack.map(s => `<div>${esc(String(s))}</div>`).join('')}</div>
+      </div>`;
       con(`Getter "${method}" on ${target}: ${JSON.stringify(r.stack)}`, 'success');
     } else {
       resEl.innerText = `Error: ${r.error}`;
