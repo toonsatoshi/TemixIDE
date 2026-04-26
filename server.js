@@ -237,7 +237,7 @@ If only one contract is needed, set "multi" to false and provide one entry in "c
 async function executeContractGeneration(chatId, prompt, statusMessageId) {
     const updateStatus = async (msg) => {
         try {
-            await bot.editMessageText(msg, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' });
+            await pollingBotInstance.editMessageText(msg, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' });
         } catch (e) { /* ignore edit errors */ }
     };
 
@@ -290,9 +290,9 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
         fs.writeFileSync(path.join(sessionPath, fileName), code);
         logger.info(`AI Generated contract: ${fileName} in session ${state.currentSession}`);
         
-        try { await bot.deleteMessage(chatId, statusMessageId); } catch(e){}
+        try { await pollingBotInstance.deleteMessage(chatId, statusMessageId); } catch(e){}
 
-        await bot.sendMessage(chatId, `✨ <b>Contract Generated & Verified!</b>\n\n<b>File:</b> <code>${fileName}</code>\n<b>Session:</b> <code>${state.currentSession}</code>\n\n\`\`\`tact\n${code.slice(0, 3000)}${code.length > 3000 ? '\n...(truncated)' : ''}\n\`\`\``, {
+        await pollingBotInstance.sendMessage(chatId, `✨ <b>Contract Generated & Verified!</b>\n\n<b>File:</b> <code>${fileName}</code>\n<b>Session:</b> <code>${state.currentSession}</code>\n\n\`\`\`tact\n${code.slice(0, 3000)}${code.length > 3000 ? '\n...(truncated)' : ''}\n\`\`\``, {
             parse_mode: 'HTML',
             reply_markup: {
                 inline_keyboard: [[{ text: '🔨 Compile Now', callback_data: `do_compile:${getShort(fileName)}` }]]
@@ -314,7 +314,7 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
             });
         }
 
-        await bot.sendMessage(chatId, `📖 <b>Usage Guide for ${contractName}</b>\n\n${guide}`, {
+        await pollingBotInstance.sendMessage(chatId, `📖 <b>Usage Guide for ${contractName}</b>\n\n${guide}`, {
             parse_mode: 'HTML',
             reply_markup: buttons.length > 0 ? {
                 inline_keyboard: [
@@ -327,8 +327,8 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
         return { success: true, contractName };
     } catch (e) {
         logger.error('executeContractGeneration failed', '', e);
-        try { await bot.editMessageText(`❌ <b>AI Forge Failed</b>\n\n${e.message}`, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' }); }
-        catch(e2) { bot.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${e.message}`, { parse_mode: 'HTML' }); }
+        try { await pollingBotInstance.editMessageText(`❌ <b>AI Forge Failed</b>\n\n${e.message}`, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' }); }
+        catch(e2) { pollingBotInstance.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${e.message}`, { parse_mode: 'HTML' }); }
         return { success: false, error: e.message };
     }
 }
