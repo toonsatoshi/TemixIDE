@@ -177,7 +177,61 @@ async function generateAIExplanation(prompt, context) {
 }
 
 async function analyzeAIRequirement(prompt) {
-    // ... (existing code)
+    if (!DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY not configured in .env');
+    const response = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify({
+            model: DEEPSEEK_MODEL,
+            messages: [
+                { 
+                  role: 'system', 
+                  content: `Analyze the user's request for a TON/Tact smart contract. 
+Determine if this request requires multiple separate contract files (e.g., a factory and its children, or separate logic modules).
+
+You must respond with a JSON object ONLY:
+{
+  "multi": boolean,
+  "explanation": "Brief explanation of why multiple contracts are needed (if multi is true)",
+  "contracts": [
+    { "name": "ContractName", "purpose": "What this contract does", "prompt": "Specific detailed prompt to generate ONLY this contract" }
+  ]
+}
+
+If only one contract is needed, set "multi" to false and provide one entry in "contracts".` 
+                },
+                { role: 'user', content: prompt }
+            ],
+            stream: false,
+            response_format: { type: 'json_object' }
+        })
+    });
+    
+    if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(`DeepSeek API error (Analysis): ${errData.error?.message || response.statusText}`);
+    }
+    
+    const data = await response.json();
+    if (!data.choices || !data.choices[0] || !data.choices[0].message || !data.choices[0].message.content) {
+        throw new Error('Invalid response from AI API');
+    }
+    
+    try {
+        const result = JSON.parse(data.choices[0].message.content);
+        if (typeof result !== 'object' || result === null) throw new Error('AI returned null or non-object');
+        if (typeof result.multi === 'undefined') result.multi = false;
+        if (!Array.isArray(result.contracts)) {
+            result.contracts = [{ name: 'Generated', purpose: 'Contract generation', prompt: prompt }];
+        }
+        return result;
+    } catch (e) {
+        logger.error('Failed to parse AI Analysis JSON', '', e);
+        return { multi: false, contracts: [{ name: 'Generated', purpose: 'Contract generation', prompt: prompt }] };
+    }
 }
 
 async function executeContractGeneration(chatId, prompt, statusMessageId) {
