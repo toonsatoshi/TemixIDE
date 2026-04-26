@@ -207,8 +207,7 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
             
             await updateStatus(`🔨 <b>Temix IDE: Verifying Contract Integrity...</b>`);
             
-            const nameMatch = code.match(/contract\s+([a-zA-Z0-9]+)/);
-            const contractName = nameMatch ? nameMatch[1] : 'Generated';
+            const contractName = extractContractName(code);
             const fileName = `${contractName}_verify.tact`;
             const sessionPath = getSessionPath();
             
@@ -231,8 +230,7 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
         
         const guide = await generateAIUsageGuide(code);
         const sessionPath = getSessionPath();
-        const nameMatch = code.match(/contract\s+([a-zA-Z0-9]+)/);
-        const contractName = nameMatch ? nameMatch[1] : 'Generated';
+        const contractName = extractContractName(code);
         const fileName = `${contractName}.tact`;
         
         fs.writeFileSync(path.join(sessionPath, fileName), code);
@@ -281,12 +279,34 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
     }
 }
 
+function parseTactError(output) {
+    const lines = output.split('\n');
+    const errorMarkers = [];
+    for (let i = 0; i < lines.length; i++) {
+        // Match standard Tact error format: file.tact:line:col: message
+        const match = lines[i].match(/(.*?\.tact):(\d+):(\d+): (.*)/);
+        if (match) {
+            errorMarkers.push(`Line ${match[2]}, Col ${match[3]}: ${match[4]}`);
+        }
+    }
+    return errorMarkers.length > 0 ? `Detailed Errors:\n${errorMarkers.join('\n')}` : output.slice(0, 1000);
+}
+
+function extractContractName(code) {
+    const match = code.match(/contract\s+([a-zA-Z0-9]+)/);
+    return match ? match[1] : 'Generated';
+}
+
 async function compileSilent(code, fileName, sessionPath) {
     const tempFile = path.join(sessionPath, fileName);
     fs.writeFileSync(tempFile, code);
     
     const tempConfigPath = path.join(sessionPath, `temp_verify_${fileName}.json`);
-    const projectName = `Verify_${fileName.replace('.tact', '')}`;
+    const projectName = `Verify_${fileName.replace('.tact', '').replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const buildVerifyDir = path.join(sessionPath, 'build_verify');
+    
+    if (!fs.existsSync(buildVerifyDir)) fs.mkdirSync(buildVerifyDir, { recursive: true });
+
     const tempConfig = {
         projects: [{
             name: projectName,
@@ -296,12 +316,9 @@ async function compileSilent(code, fileName, sessionPath) {
         }]
     };
     
-    const buildVerifyDir = path.join(sessionPath, 'build_verify');
-    if (!fs.existsSync(buildVerifyDir)) fs.mkdirSync(buildVerifyDir, { recursive: true });
-
     fs.writeFileSync(tempConfigPath, JSON.stringify(tempConfig));
     try {
-        execSync(`npx tact --config temp_verify_${fileName}.json 2>&1`, { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
+        execSync(`npx tact --config "${path.basename(tempConfigPath)}" 2>&1`, { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
         
         const abiPath = path.join(buildVerifyDir, `${projectName}.abi`);
         let abi = null;
@@ -311,9 +328,15 @@ async function compileSilent(code, fileName, sessionPath) {
         return { success: true, abi };
     } catch (e) {
         const err = e.stdout ? e.stdout.toString() : e.message;
-        return { success: false, error: err };
+        return { success: false, error: parseTactError(err) };
     } finally {
-        if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
+        try {
+            if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
+            if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+            if (fs.existsSync(buildVerifyDir)) fs.rmSync(buildVerifyDir, { recursive: true, force: true });
+        } catch (cleanupErr) {
+            logger.error('Cleanup failed', '', cleanupErr);
+        }
     }
 }
 
