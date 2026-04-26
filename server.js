@@ -2143,33 +2143,60 @@ The professional IDE for TON, now in your pocket.
           } catch (e) { logger.error('Bot view art fail', '', e); bot.sendMessage(chatId, "❌ Error reading artifact."); }
         }
 
-        else if (data.startsWith('ai_explain:')) {
-            const name = getLong(data.split(':')[1]);
-            const sessionPath = getSessionPath();
-            const filePath = path.join(sessionPath, `${name}.tact`);
-            if (!fs.existsSync(filePath)) return bot.sendMessage(chatId, "❌ Source code not found.");
+        else if (data.startsWith('ai_explain:') || data.startsWith('ai_err_explain:')) {
+            const isError = data.startsWith('ai_err_explain:');
+            const parts = data.split(':');
+            const name = getLong(parts[1]);
+            const errCode = isError ? parts[2] : null;
             
-            const code = fs.readFileSync(filePath, 'utf8');
-            bot.sendMessage(chatId, "🤖 <b>AI is analyzing the contract...</b>", { parse_mode: 'HTML' });
-            try {
-                const explanation = await generateAIExplanation("Explain how this contract works and what I can do with it.", code);
-                bot.sendMessage(chatId, `📖 <b>AI Explanation for ${name}</b>\n\n${explanation}`, { parse_mode: 'HTML' });
-            } catch (e) {
-                bot.sendMessage(chatId, `❌ AI Analysis failed: ${e.message}`);
+            const sessionPath = getSessionPath();
+            let code = null;
+            let fileName = `${name}.tact`;
+            
+            // Try different filename combinations
+            const candidates = [
+                fileName,
+                `${name.replace(/^Target_/, '')}.tact`,
+                `${name.replace(/^Target_.*_/, '')}.tact`,
+                'contract.tact'
+            ];
+            
+            for (const cand of candidates) {
+                const p = path.join(sessionPath, cand);
+                if (fs.existsSync(p)) {
+                    code = fs.readFileSync(p, 'utf8');
+                    fileName = cand;
+                    break;
+                }
             }
-        }
-
-        else if (data.startsWith('ai_err_explain:')) {
-            const [, sName, errCode] = data.split(':');
-            const name = getLong(sName);
-            const sessionPath = getSessionPath();
-            const filePath = path.join(sessionPath, `${name}.tact`);
-            const code = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : "[Source not found]";
             
-            bot.sendMessage(chatId, "🤖 <b>AI is investigating the failure...</b>", { parse_mode: 'HTML' });
+            if (!code) {
+                // Last resort: search files for "contract <Name>"
+                const files = fs.readdirSync(sessionPath).filter(f => f.endsWith('.tact'));
+                for (const f of files) {
+                    const content = fs.readFileSync(path.join(sessionPath, f), 'utf8');
+                    if (content.includes(`contract ${name}`) || content.includes(`contract ${name.replace(/^Target_/, '').split('_')[0]}`)) {
+                        code = content;
+                        fileName = f;
+                        break;
+                    }
+                }
+            }
+            
+            if (!code && !isError) return pollingBotInstance.sendMessage(chatId, "❌ Source code not found in session.");
+            if (!code) code = "[Source not found]";
+
+            const statusText = isError ? "🤖 <b>AI is investigating the failure...</b>" : "🤖 <b>AI is analyzing the contract...</b>";
+            bot.sendMessage(chatId, statusText, { parse_mode: 'HTML' });
+            
             try {
-                const explanation = await generateAIExplanation(`The contract failed with exit code ${errCode}. Analyze the code and explain why this might have happened and how to fix it.`, code);
-                bot.sendMessage(chatId, `🔍 <b>AI Failure Analysis</b>\n\n${explanation}`, { parse_mode: 'HTML' });
+                const prompt = isError 
+                    ? `The contract failed with exit code ${errCode}. Analyze the code and explain why this might have happened and how to fix it.`
+                    : "Explain how this contract works and what I can do with it.";
+                
+                const explanation = await generateAIExplanation(prompt, code);
+                const title = isError ? `🔍 <b>AI Failure Analysis for ${name}</b>` : `📖 <b>AI Explanation for ${name}</b>`;
+                bot.sendMessage(chatId, `${title}\n\n${explanation}`, { parse_mode: 'HTML' });
             } catch (e) {
                 bot.sendMessage(chatId, `❌ AI Analysis failed: ${e.message}`);
             }
