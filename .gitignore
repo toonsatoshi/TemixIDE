@@ -1,0 +1,11 @@
+node_modules/
+build/
+logs/
+.env
+dev-wallet.json
+state.json
+.gemini/
+*.boc
+*.fif
+*.pkg
+*.fc

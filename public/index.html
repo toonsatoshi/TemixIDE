@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TemixIDE v2.0</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs/loader.min.js"></script>
+  <style>
+    /* ── Design Tokens ── */
+    :root {
+      --bg:          #0d1117; --panel:       #161b22; --card:        #21262d;
+      --card-h:      #2a3038; --border:      #30363d; --border-f:    #58a6ff;
+      --text:        #c9d1d9; --muted:       #8b949e; --accent:      #58a6ff;
+      --accent-dim:  rgba(88,166,255,0.12); --success:    #238636; --success-h:  #2ea043;
+      --success-t:   #3fb950; --danger:      #da3633; --danger-h:    #f85149;
+      --warn:        #d29922; --warn-t:      #e3b341; --purple:      #8b5cf6;
+      --r:           10px;    --r-sm:        6px;
+      --shadow:      0 4px 20px rgba(0,0,0,0.5);
+      --trans:       all 0.2s cubic-bezier(0.4,0,0.2,1);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; background: var(--bg); color: var(--text); overflow: hidden; font-size: 14px; }
+
+    /* ── Topbar ── */
+    #topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 18px; height: 46px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 100; }
+    .logo { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; letter-spacing: 0.4px; }
+    .ver { font-size: 10px; color: var(--muted); background: var(--card); padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); font-weight: 400; }
+    .controls { display: flex; align-items: center; gap: 14px; }
+    .net-badge { font-size: 10px; font-weight: 700; color: var(--warn-t); background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.3); padding: 3px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 1.2px; }
+    .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--success-t); box-shadow: 0 0 6px var(--success-t); animation: pulse 2s infinite; }
+    .sdot.off { background: var(--danger-h); box-shadow: 0 0 6px var(--danger-h); }
+    @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.45} }
+    .hint { font-size: 11px; color: var(--muted); }
+
+    /* ── Main Layout ── */
+    #main { display: flex; flex: 1; overflow: hidden; }
+    #editor-pane { flex: 1 1 65%; min-width: 280px; height: 100%; position: relative; }
+    #editor-tools { position: absolute; top: 10px; right: 25px; z-index: 20; display: flex; gap: 8px; }
+    #editor { width: 100%; height: 100%; }
+    #resizer { width: 4px; cursor: col-resize; background: var(--border); flex-shrink: 0; transition: background 0.2s; }
+    #resizer:hover, #resizer.drag { background: var(--accent); }
+
+    /* ── Mobile Optimization ── */
+    @media (max-width: 850px) {
+      #main { flex-direction: column; }
+      #editor-pane { flex: 1 1 50%; width: 100%; }
+      #sidebar { width: 100% !important; flex: 1 1 50%; border-left: none; border-top: 1px solid var(--border); }
+      #resizer { width: 100%; height: 6px; cursor: row-resize; }
+      .logo span.ver { display: none; }
+      #topbar { padding: 0 12px; }
+      .controls .hint { display: none; }
+      #editor-tools { top: 5px; right: 10px; }
+    }
+
+    /* ── Sidebar ── */
+    #sidebar { width: 380px; flex-shrink: 0; background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    #tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--bg); flex-shrink: 0; }
+    .tab { flex: 1; padding: 10px 4px; text-align: center; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: var(--trans); text-transform: uppercase; letter-spacing: 0.8px; }
+    .tab:hover { color: var(--text); background: var(--accent-dim); }
+    .tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+    .tpanel { display: none; }
+    .tpanel.on { display: block; }
+    #scroll { flex: 1; overflow-y: auto; padding: 14px; }
+
+    /* ── Sections ── */
+    .sec { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin: 16px 0 8px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .card { background: var(--card); padding: 14px; border-radius: var(--r); margin-bottom: 10px; border: 1px solid var(--border); transition: var(--trans); }
+    .card:hover { border-color: #484f58; }
+
+    /* ── Buttons ── */
+    .btn { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 11px 16px; margin-top: 9px; border-radius: var(--r-sm); font-weight: 600; font-size: 13px; cursor: pointer; border: 1px solid rgba(240,246,252,0.1); transition: var(--trans); letter-spacing: 0.2px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+    .btn:hover:not(:disabled) { transform: translateY(-1px); }
+    .btn:active { transform: scale(0.98) !important; }
+    .btn-p { background: var(--success);  color: #fff; }
+    .btn-p:hover { background: var(--success-h); box-shadow: 0 4px 14px rgba(35,134,54,0.4); }
+    .btn-s { background: var(--card);    color: var(--text); border-color: var(--border); }
+    .btn-s:hover { background: var(--card-h); }
+    .btn-d { background: var(--danger);  color: #fff; }
+    .btn-d:hover { background: var(--danger-h); }
+    .btn-sm { width: auto; padding: 4px 11px; font-size: 11px; margin-top: 0; }
+
+    /* ── Inputs ── */
+    input { width: 100%; padding: 10px 13px; margin-top: 7px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: var(--r-sm); font-family: 'Fira Code', monospace; font-size: 12px; transition: var(--trans); }
+    input:focus { outline: none; border-color: var(--border-f); box-shadow: 0 0 0 3px var(--accent-dim); }
+    ::placeholder { color: var(--muted); }
+
+    /* ── Wallet ── */
+    .wblock { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; position: relative; overflow: hidden; }
+    .wblock::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background: linear-gradient(180deg, var(--accent), var(--purple)); }
+    #w-addr { font-family: monospace; font-size: 11px; color: var(--accent); word-break: break-all; cursor: pointer; line-height: 1.5; }
+    #w-addr:hover { color: #79c0ff; }
+    #w-bal  { font-size: 20px; font-weight: 700; color: var(--success-t); margin-top: 3px; font-family: 'Fira Code', monospace; }
+    #w-meta { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+    /* ── Console ── */
+    #console-wrap { background: #090c10; border: 1px solid var(--border); border-radius: var(--r-sm); font-family: 'Fira Code', monospace; font-size: 11px; min-height: 200px; max-height: 320px; overflow-y: auto; padding: 10px; }
+    .cl { padding: 2px 0; line-height: 1.5; border-bottom: 1px solid rgba(48,54,61,0.25); }
+    .cl.info    { color: var(--accent); }
+    .cl.success { color: var(--success-t); }
+    .cl.error   { color: var(--danger-h); }
+    .cl.warn    { color: var(--warn-t); }
+    .cl.log     { color: var(--muted); }
+    .cts { opacity: 0.45; margin-right: 7px; }
+
+    /* ── TX History ── */
+    .tx { padding: 9px 11px; background: var(--bg); border-radius: var(--r-sm); margin-bottom: 5px; border: 1px solid var(--border); font-size: 12px; }
+    .tx-type { font-weight: 700; color: var(--accent); text-transform: uppercase; font-size: 10px; letter-spacing: 0.6px; }
+    .tx-addr { font-family: monospace; color: var(--muted); word-break: break-all; margin-top: 2px; }
+    .tx-ts   { color: var(--muted); font-size: 10px; margin-top: 2px; opacity: 0.65; }
+
+    /* ── Artifacts ── */
+    .art, .fitem { display: flex; justify-content: space-between; align-items: center; padding: 7px 11px; background: var(--bg); border-radius: var(--r-sm); border: 1px solid var(--border); margin-bottom: 4px; font-size: 12px; cursor: pointer; transition: var(--trans); }
+    .art:hover, .fitem:hover { border-color: var(--accent); background: var(--card); }
+    .art-name, .fitem-name { font-family: monospace; }
+    .art-sz   { color: var(--muted); }
+
+    /* ── Deploy result ── */
+    #deploy-result { margin-top: 9px; display: none; }
+    .dep-addr { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 9px 12px; font-family: monospace; font-size: 11px; color: var(--accent); word-break: break-all; cursor: pointer; margin-top: 5px; }
+    .dep-addr:hover { color: #79c0ff; }
+
+    /* ── Toast ── */
+    #toasts { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 7px; }
+    .toast { padding: 11px 18px; border-radius: var(--r-sm); background: var(--card); color: var(--text); box-shadow: var(--shadow); border-left: 4px solid; display: flex; align-items: center; gap: 11px; font-size: 12px; min-width: 240px; max-width: 380px; animation: sIn 0.25s ease; }
+    .toast.success { border-color: var(--success-t); } .toast.error { border-color: var(--danger-h); }
+    .toast.info    { border-color: var(--accent);    } .toast.warn  { border-color: var(--warn-t);    }
+    @keyframes sIn  { from{transform:translateX(110%);opacity:0} to{transform:translateX(0);opacity:1} }
+    @keyframes sOut { from{opacity:1} to{transform:translateX(110%);opacity:0} }
+
+    /* ── Status Bar ── */
+    #statusbar { height: 22px; background: #1a7f37; display: flex; align-items: center; padding: 0 14px; gap: 18px; font-size: 11px; font-weight: 500; flex-shrink: 0; }
+    .sb { display: flex; align-items: center; gap: 4px; color: rgba(255,255,255,0.88); }
+
+    /* ── Misc ── */
+    a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; color: #79c0ff; }
+    .empty { color: var(--muted); text-align: center; font-size: 12px; padding: 24px 0; }
+    .row   { display: flex; gap: 8px; align-items: center; }
+    ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+  </style>
+</head>
+<body>
+
+<div id="topbar">
+  <div class="logo">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+    TemixIDE <span class="ver">v2.0</span>
+  </div>
+  <div class="controls">
+    <span class="hint">Ctrl+Enter: Compile</span>
+    <span class="net-badge" id="net-label">testnet</span>
+    <div class="sdot" id="sdot" title="Server status"></div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="editor-pane">
+    <div id="editor-tools">
+      <button class="btn btn-s btn-sm" onclick="clearEditor()" title="Clear Editor">Clear</button>
+      <button class="btn btn-s btn-sm" onclick="pasteToEditor()" title="Paste from Clipboard">Paste</button>
+    </div>
+    <div id="editor"></div>
+  </div>
+  <div id="resizer"></div>
+  <div id="sidebar">
+    <div id="tabs">
+      <div class="tab on"  onclick="tab('forge')">⚒ Forge</div>
+      <div class="tab"     onclick="tab('interact')">🎮 Interact</div>
+      <div class="tab"     onclick="tab('files')">📁 Files</div>
+      <div class="tab"     onclick="tab('console')">⬡ Console</div>
+      <div class="tab"     onclick="tab('history')">📋 History</div>
+      <div class="tab"     onclick="tab('build')">📦 Build</div>
+    </div>
+    <div id="scroll">
+
+      <!-- FORGE -->
+      <div id="tp-forge" class="tpanel on">
+        <div class="sec">Dev Wallet</div>
+        <div class="card">
+          <div class="wblock">
+            <div id="w-addr" onclick="copy(this.innerText)" title="Click to copy">Connecting...</div>
+            <div id="w-bal">– TON</div>
+            <div id="w-meta">Network: —</div>
+          </div>
+          <div class="row" style="margin-top:10px; justify-content:space-between;">
+            <a href="https://t.me/testnet_bot" target="_blank" style="font-size:12px;">👉 Testnet Faucet</a>
+            <button class="btn btn-s btn-sm" onclick="loadWallet()">↻ Sync</button>
+          </div>
+        </div>
+
+        <div class="sec">Compiler</div>
+        <div class="card">
+          <button id="bc" class="btn btn-p" onclick="compile()">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            Build Smart Contract
+          </button>
+          <div style="font-size:11px;color:var(--muted);margin-top:7px;">Ctrl+Enter · 60s timeout · 500 KB max</div>
+        </div>
+
+        <div class="sec">Deployment</div>
+        <div class="card">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Select Contract:</div>
+          <select id="contract-select" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:var(--r-sm); margin-bottom:10px;">
+            <option value="">(Compile first)</option>
+          </select>
+          <button id="bd" class="btn btn-p" onclick="deploy()">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            Deploy Selected Contract
+          </button>
+          <div id="deploy-result">
+            <div style="font-size:11px;color:var(--muted);">Deployed Address:</div>
+            <div id="dep-addr" class="dep-addr" onclick="copy(this.innerText)" title="Click to copy"></div>
+            <a id="exp-link" href="#" target="_blank" style="font-size:11px;display:block;margin-top:5px;">🔍 View on Explorer →</a>
+          </div>
+        </div>
+
+        <div class="sec">Contract Interaction</div>
+        <div class="card">
+          <input type="text" id="t-addr"  placeholder="Target Address (EQ...)">
+          <input type="text" id="t-msg"   placeholder='Message string (e.g. "increment")'>
+          <input type="text" id="t-val"   placeholder="TON value (default: 0.02)" value="0.02">
+          <button id="bi" class="btn btn-p" onclick="interact()" style="margin-top:11px;">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            Execute Transaction
+          </button>
+        </div>
+
+        <div class="sec">Contract Getters</div>
+        <div class="card">
+          <input type="text" id="g-addr"  placeholder="Contract Address">
+          <input type="text" id="g-meth"  placeholder='Method name (e.g. "counter")'>
+          <button id="bg" class="btn btn-s" onclick="callGetter()" style="margin-top:11px;">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            Call Get Method
+          </button>
+          <div id="getter-result" style="margin-top:10px; font-family:monospace; font-size:11px; color:var(--success-t); word-break:break-all;"></div>
+        </div>
+
+        <div class="sec" style="margin-top:6px;">
+          Wallet Actions <span style="font-size:10px;color:var(--danger-h);">⚠ Danger Zone</span>
+        </div>
+        <div class="card">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:7px;">Backs up then deletes current wallet key file. Server restart required.</div>
+          <button class="btn btn-d" onclick="resetWallet()">🗑 Reset &amp; Regenerate Wallet</button>
+        </div>
+      </div>
+
+      <!-- INTERACTIONS -->
+      <div id="tp-interact" class="tpanel">
+        <div class="sec">Contract Interaction</div>
+        <div class="card">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Select Deployed Contract:</div>
+          <select id="i-contract-select" onchange="loadContractABI()" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:var(--r-sm); margin-bottom:10px;">
+            <option value="">(Select a contract)</option>
+          </select>
+          <div id="i-contract-info" style="display:none;">
+            <div style="font-size:11px;color:var(--muted);">Address:</div>
+            <div id="i-addr" class="dep-addr" style="margin-bottom:10px;" onclick="copy(this.innerText)"></div>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <input type="text" id="manual-addr" placeholder="Or enter address manually..." style="margin-top:0;">
+            <button class="btn btn-s btn-sm" onclick="setManualAddr()" style="width:auto;">Set</button>
+          </div>
+        </div>
+
+        <div id="abi-interactions">
+           <div class="empty">Select a contract to see interactions.</div>
+        </div>
+      </div>
+
+      <!-- FILES -->
+      <div id="tp-files" class="tpanel">
+        <div class="sec">Project Files <button class="btn btn-s btn-sm" onclick="loadFiles()">↻ Refresh</button></div>
+        <div id="file-list"><div class="empty">Scanning for .tact files...</div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:7px;">Click to load into editor</div>
+      </div>
+
+      <!-- CONSOLE -->
+      <div id="tp-console" class="tpanel">
+        <div class="sec">Live Server Log <button class="btn btn-s btn-sm" onclick="clearCon()">Clear</button></div>
+        <div id="console-wrap"></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:7px;">Connected via WebSocket · Real-time events</div>
+      </div>
+
+      <!-- HISTORY -->
+      <div id="tp-history" class="tpanel">
+        <div class="sec">Transaction History <button class="btn btn-s btn-sm" onclick="clearHist()">Clear</button></div>
+        <div id="tx-list"><div class="empty">No transactions yet.</div></div>
+      </div>
+
+      <!-- BUILD -->
+      <div id="tp-build" class="tpanel">
+        <div class="sec">Build Artifacts <button class="btn btn-s btn-sm" onclick="loadArts()">↻ Refresh</button></div>
+        <div id="art-list"><div class="empty">Compile to generate artifacts.</div></div>
+        <div id="clog-wrap" style="display:none;margin-top:12px;">
+          <div class="sec">Last Compiler Output</div>
+          <div id="clog" style="background:#090c10;border:1px solid var(--border);border-radius:6px;padding:10px;font-family:monospace;font-size:11px;max-height:220px;overflow:auto;color:var(--muted);white-space:pre-wrap;"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <div class="sb">
+    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <span id="sb-st">Initializing...</span>
+  </div>
+  <div class="sb">⏱ <span id="sb-up">0s</span></div>
+  <div class="sb">🌐 <span id="sb-net">testnet</span></div>
+</div>
+<div id="toasts"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────
+let editor, ws;
+let hist = JSON.parse(localStorage.getItem('tfm-hist') || '[]');
+
+// ── WebSocket ────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onopen    = () => { con('WebSocket live.', 'success'); dot(true); };
+  ws.onclose   = () => { con('WebSocket closed. Reconnecting...', 'warn'); dot(false); setTimeout(connectWS, 3000); };
+  ws.onerror   = () => con('WebSocket error.', 'error');
+  ws.onmessage = e => {
+    try {
+      const m = JSON.parse(e.data);
+      const cls = (m.type||'').includes('error') ? 'error' : (m.type||'').includes('success') ? 'success' : (m.type||'').includes('warn') ? 'warn' : 'info';
+      con(`[${m.type}] ${m.data||''}`, cls);
+    } catch {}
+  };
+}
+
+function dot(ok) { document.getElementById('sdot').classList.toggle('off', !ok); }
+
+// ── Console ──────────────────────────────────────────────────────────
+function con(msg, cls='log') {
+  const p = document.getElementById('console-wrap');
+  const d = document.createElement('div'); d.className = `cl ${cls}`;
+  d.innerHTML = `<span class="cts">${new Date().toLocaleTimeString()}</span>${esc(String(msg))}`;
+  p.appendChild(d); p.scrollTop = p.scrollHeight;
+  while (p.children.length > 200) p.removeChild(p.firstChild);
+}
+function clearCon() { document.getElementById('console-wrap').innerHTML = ''; }
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Toast ────────────────────────────────────────────────────────────
+const ICONS = { success:'✓', error:'✗', info:'ℹ', warn:'⚠' };
+function toast(msg, type='info') {
+  const c = document.getElementById('toasts');
+  const t = document.createElement('div'); t.className = `toast ${type}`;
+  t.innerHTML = `<span style="font-size:15px">${ICONS[type]||''}</span><span>${esc(String(msg))}</span>`;
+  c.appendChild(t);
+  setTimeout(() => { t.style.animation='sOut 0.3s ease forwards'; setTimeout(()=>t.remove(),300); }, 4000);
+}
+
+// ── Buttons ──────────────────────────────────────────────────────────
+function setBtn(id, busy, html) {
+  const b = document.getElementById(id);
+  b.disabled = busy; b.innerHTML = busy ? '⏳ Processing...' : html;
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────────
+const TABS = ['forge','interact','files','console','history','build'];
+function tab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('on', TABS[i]===name));
+  document.querySelectorAll('.tpanel').forEach(p => p.classList.toggle('on', p.id===`tp-${name}`));
+  if (name==='build') loadArts();
+  if (name==='files') loadFiles();
+}
+
+// ── Clipboard ────────────────────────────────────────────────────────
+function copy(txt) {
+  navigator.clipboard.writeText(txt).then(()=>toast('Copied!','success')).catch(()=>toast('Copy failed.','error'));
+}
+
+// ── Wallet ───────────────────────────────────────────────────────────
+async function loadWallet() {
+  try {
+    const r = await fetch('/api/wallet').then(x=>x.json());
+    if (r.address) {
+      document.getElementById('w-addr').innerText = r.address;
+      document.getElementById('w-bal').innerText  = `${r.balance} TON`;
+      document.getElementById('w-meta').innerText = `Network: ${r.network} · ${r.walletVersion}`;
+      document.getElementById('net-label').innerText = r.network;
+      document.getElementById('sb-net').innerText    = r.network;
+    }
+  } catch(e) { con('Wallet sync failed: '+e.message,'error'); }
+}
+
+async function resetWallet() {
+  if (!confirm('Back up and delete the current wallet key? Server must restart to create a new one.')) return;
+  try {
+    const r = await fetch('/api/wallet',{method:'DELETE'}).then(x=>x.json());
+    if (r.success) { toast('Wallet reset. Restart the server.','warn'); con('Wallet reset. Backup: '+r.backup,'warn'); }
+    else toast('Failed: '+r.error,'error');
+  } catch(e) { toast('Error: '+e.message,'error'); }
+}
+
+// ── Compile ──────────────────────────────────────────────────────────
+const LBL_C = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> Build Smart Contract';
+async function compile() {
+  setBtn('bc',true,''); toast('Compiling...','info'); con('Build initiated...','info'); tab('console');
+  try {
+    const r = await fetch('/api/compile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:editor.getValue()})}).then(x=>x.json());
+    if (r.success) {
+      toast(`✓ Built in ${r.duration}ms!`,'success');
+      con(`Build OK in ${r.duration}ms — artifacts: ${(r.artifacts||[]).join(', ')}`,'success');
+      document.getElementById('clog').innerText = r.log||'';
+      document.getElementById('clog-wrap').style.display='block';
+      loadArts(); loadContracts(); tab('build');
+    }
+ else {
+      toast('Build failed — check console.','error'); con('FAILED:\n'+r.error,'error');
+      markErrors(r.error);
+    }
+  } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
+  finally { setBtn('bc',false,LBL_C); }
+}
+
+function markErrors(errText) {
+  if (!editor) return;
+  const m = errText.match(/:(\d+):/);
+  if (m) {
+    const ln = parseInt(m[1],10);
+    editor.revealLine(ln); editor.setPosition({lineNumber:ln,column:1});
+    monaco.editor.setModelMarkers(editor.getModel(),'tact',[{severity:8,message:'Compile error',startLineNumber:ln,endLineNumber:ln,startColumn:1,endColumn:999}]);
+  }
+}
+
+// ── Deploy ───────────────────────────────────────────────────────────
+const LBL_D = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Deploy Selected Contract';
+async function deploy() {
+  const contractName = document.getElementById('contract-select').value;
+  if (!contractName) return toast('Please select a contract first.', 'warn');
+  
+  setBtn('bd',true,''); toast(`Deploying ${contractName}...`,'info'); con(`Deploy started for ${contractName}...`,'info'); tab('console');
+  try {
+    const r = await fetch('/api/deploy',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ contractName })
+    }).then(x=>x.json());
+    if (r.address) {
+      toast('🚀 Deployed!','success'); con(`Deployed: ${r.address}`,'success');
+      document.getElementById('t-addr').value = r.address;
+      document.getElementById('dep-addr').innerText = r.address;
+      const el = document.getElementById('exp-link'); el.href = r.explorerUrl||'#';
+      document.getElementById('deploy-result').style.display='block';
+      
+      // Save to deployedAddresses
+      deployedAddresses[contractName] = r.address;
+      localStorage.setItem('tfm-deployed', JSON.stringify(deployedAddresses));
+      
+      saveTx({type:'deploy',address:r.address,ts:new Date().toISOString(),seqno:r.seqno});
+      setTimeout(loadWallet,3000); 
+      
+      // Switch to interact tab and select the contract
+      document.getElementById('i-contract-select').value = contractName;
+      loadContractABI();
+      tab('interact');
+    } else { toast('Deploy failed: '+r.error,'error'); con('FAILED: '+r.error,'error'); }
+  } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
+  finally { setBtn('bd',false,LBL_D); }
+}
+
+// ── Interact ─────────────────────────────────────────────────────────
+const LBL_I = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Execute Transaction';
+async function interact() {
+  const target  = document.getElementById('t-addr').value.trim();
+  const message = document.getElementById('t-msg').value.trim();
+  const value   = document.getElementById('t-val').value.trim()||'0.02';
+  if (!target)  return toast('Target address required.','error');
+  if (!message) return toast('Message required.','error');
+  setBtn('bi',true,''); toast(`Sending "${message}"...`,'info');
+  try {
+    const r = await fetch('/api/interact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,message,value})}).then(x=>x.json());
+    if (r.success) {
+      toast('Transaction dispatched!','success'); con(`Sent "${message}" → ${target} (seqno:${r.seqno})`,'success');
+      saveTx({type:'interact',target,message,value,ts:new Date().toISOString(),seqno:r.seqno});
+      setTimeout(loadWallet,3000); tab('history');
+    } else { toast('Failed: '+r.error,'error'); con('FAILED: '+r.error,'error'); }
+  } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
+  finally { setBtn('bi',false,LBL_I); }
+}
+
+async function callGetter() {
+  const target = document.getElementById('g-addr').value.trim();
+  const method = document.getElementById('g-meth').value.trim();
+  const resEl  = document.getElementById('getter-result');
+  if (!target || !method) return toast('Address and Method required.', 'warn');
+  
+  setBtn('bg', true, '⏳'); resEl.innerText = 'Calling...';
+  try {
+    const r = await fetch('/api/getter', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ target, method })
+    }).then(x => x.json());
+    
+    if (r.success) {
+      resEl.innerText = `Result: ${JSON.stringify(r.stack)}`;
+      con(`Getter "${method}" on ${target}: ${JSON.stringify(r.stack)}`, 'success');
+    } else {
+      resEl.innerText = `Error: ${r.error}`;
+      con(`Getter FAILED: ${r.error}`, 'error');
+    }
+  } catch (e) { toast('Network error', 'error'); }
+  finally { setBtn('bg', false, '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Call Get Method'); }
+}
+
+// ── TX History ────────────────────────────────────────────────────────
+function saveTx(tx) {
+  hist.unshift(tx); if (hist.length>50) hist.pop();
+  localStorage.setItem('tfm-hist', JSON.stringify(hist)); renderHist();
+}
+function renderHist() {
+  const el = document.getElementById('tx-list');
+  if (!hist.length) { el.innerHTML='<div class="empty">No transactions yet.</div>'; return; }
+  el.innerHTML = hist.map(t=>`
+    <div class="tx">
+      <div class="tx-type">${t.type}</div>
+      <div class="tx-addr">${esc(t.address||t.target||'')}${t.message?` · "${esc(t.message)}"`:''}</div>
+      <div class="tx-ts">${new Date(t.ts).toLocaleString()} · seqno: ${t.seqno??'—'}</div>
+    </div>`).join('');
+}
+function clearHist() { hist=[]; localStorage.removeItem('tfm-hist'); renderHist(); }
+
+// ── Files ─────────────────────────────────────────────────────────────
+async function loadFiles() {
+  try {
+    const r = await fetch('/api/files').then(x=>x.json());
+    const el = document.getElementById('file-list');
+    if (!r.files?.length) { el.innerHTML='<div class="empty">No .tact files found.</div>'; return; }
+    el.innerHTML = r.files.map(f=>`
+      <div class="fitem" onclick="loadFile('${esc(f)}')">
+        <span class="fitem-name">📄 ${esc(f)}</span>
+      </div>`).join('');
+  } catch(e) { con('Files load failed: '+e.message,'error'); }
+}
+
+async function loadFile(name) {
+  try {
+    toast(`Loading ${name}...`);
+    const r = await fetch(`/api/file?name=${encodeURIComponent(name)}`).then(x=>x.json());
+    if (r.content) {
+      editor.setValue(r.content);
+      toast(`${name} loaded!`, 'success');
+      con(`${name} loaded into editor.`, 'success');
+    } else { toast('Load failed: '+r.error,'error'); }
+  } catch(e) { toast('Network error','error'); }
+}
+
+async function loadContracts() {
+  try {
+    const r = await fetch('/api/contracts').then(x=>x.json());
+    const sel = document.getElementById('contract-select');
+    const iSel = document.getElementById('i-contract-select');
+    const options = r.contracts?.length 
+      ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')
+      : '<option value="">(Compile first)</option>';
+    
+    sel.innerHTML = options;
+    iSel.innerHTML = '<option value="">(Select a contract)</option>' + (r.contracts?.length 
+      ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')
+      : '');
+  } catch(e) { con('Contracts list failed: '+e.message,'error'); }
+}
+
+let deployedAddresses = JSON.parse(localStorage.getItem('tfm-deployed') || '{}');
+
+async function loadContractABI() {
+  const name = document.getElementById('i-contract-select').value;
+  const info = document.getElementById('i-contract-info');
+  const addr = document.getElementById('i-addr');
+  const container = document.getElementById('abi-interactions');
+  
+  if (!name) {
+    info.style.display = 'none';
+    container.innerHTML = '<div class="empty">Select a contract to see interactions.</div>';
+    return;
+  }
+  
+  const savedAddr = deployedAddresses[name];
+  if (savedAddr) {
+    info.style.display = 'block';
+    addr.innerText = savedAddr;
+  } else {
+    info.style.display = 'none';
+  }
+  
+  container.innerHTML = '<div class="empty">Loading ABI...</div>';
+  try {
+    const abi = await fetch(`/api/abi?contractName=${encodeURIComponent(name)}`).then(x => x.json());
+    if (abi.error) throw new Error(abi.error);
+    renderABIInteractions(abi, name);
+  } catch (e) {
+    container.innerHTML = `<div class="cl error">Failed to load ABI: ${e.message}</div>`;
+  }
+}
+
+function renderABIInteractions(abi, contractName) {
+  const container = document.getElementById('abi-interactions');
+  let html = '';
+  
+  // Receivers
+  if (abi.receivers && abi.receivers.length > 0) {
+    html += '<div class="sec">Messages (Write)</div>';
+    abi.receivers.forEach((rec, idx) => {
+      if (rec.receiver !== 'internal') return;
+      const msg = rec.message;
+      let label = '';
+      let inputs = '';
+      let action = '';
+      
+      if (msg.kind === 'text') {
+        label = `"${msg.text}"`;
+        action = `sendTextMessage('${msg.text}')`;
+      } else if (msg.kind === 'typed') {
+        label = msg.type;
+        const typeInfo = abi.types.find(t => t.name === msg.type);
+        if (typeInfo && typeInfo.fields) {
+          inputs = typeInfo.fields.map(f => `
+            <div style="margin-top:5px;">
+              <div style="font-size:10px;color:var(--muted);">${f.name} (${f.type.kind === 'simple' ? f.type.type : f.type.kind})</div>
+              <input type="text" data-field="${f.name}" data-msg="${msg.type}" placeholder="${f.name}">
+            </div>
+          `).join('');
+        }
+        action = `sendTypedMessage('${msg.type}')`;
+      }
+      
+      if (label) {
+        html += `
+          <div class="card">
+            <div style="font-weight:700; color:var(--accent); font-size:12px;">${label}</div>
+            ${inputs}
+            <button class="btn btn-p btn-sm" onclick="${action}" style="margin-top:10px;">Send Message</button>
+          </div>
+        `;
+      }
+    });
+  }
+  
+  // Getters
+  if (abi.getters && abi.getters.length > 0) {
+    html += '<div class="sec">Getters (Read)</div>';
+    abi.getters.forEach((get) => {
+      let inputs = '';
+      if (get.arguments && get.arguments.length > 0) {
+        inputs = get.arguments.map(a => `
+          <div style="margin-top:5px;">
+            <div style="font-size:10px;color:var(--muted);">${a.name} (${a.type.kind === 'simple' ? a.type.type : a.type.kind})</div>
+            <input type="text" data-arg="${a.name}" data-get="${get.name}" placeholder="${a.name}">
+          </div>
+        `).join('');
+      }
+      
+      html += `
+        <div class="card">
+          <div style="font-weight:700; color:var(--success-t); font-size:12px;">${get.name}()</div>
+          ${inputs}
+          <button class="btn btn-s btn-sm" onclick="callABIGetter('${get.name}')" style="margin-top:10px;">Call Getter</button>
+          <div id="res-${get.name}" style="margin-top:8px; font-family:monospace; font-size:11px; color:var(--success-t); word-break:break-all;"></div>
+        </div>
+      `;
+    });
+  }
+  
+  container.innerHTML = html || '<div class="empty">No interactions found in ABI.</div>';
+}
+
+async function sendTextMessage(text) {
+  const name = document.getElementById('i-contract-select').value;
+  const target = deployedAddresses[name];
+  if (!target) return toast('No address for this contract. Deploy it first or enter address.', 'warn');
+  
+  // Use existing interact function but with specific values
+  document.getElementById('t-addr').value = target;
+  document.getElementById('t-msg').value = text;
+  tab('forge'); // Switch to forge to show progress or just stay here?
+  // Let's stay here and just call the API.
+  interact(); 
+}
+
+async function sendTypedMessage(type) {
+  const contractName = document.getElementById('i-contract-select').value;
+  const target = deployedAddresses[contractName];
+  if (!target) return toast('No address for this contract.', 'warn');
+  
+  const args = {};
+  document.querySelectorAll(`input[data-msg="${type}"]`).forEach(input => {
+    args[input.getAttribute('data-field')] = input.value;
+  });
+  
+  toast(`Sending ${type}...`, 'info');
+  try {
+    const r = await fetch('/api/interact', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ target, type, args, contractName })
+    }).then(x => x.json());
+    
+    if (r.success) {
+      toast(`${type} sent!`, 'success');
+      con(`${type} dispatched → ${target} (seqno:${r.seqno})`, 'success');
+      saveTx({type: 'interact', target, message: type, ts: new Date().toISOString(), seqno: r.seqno});
+      setTimeout(loadWallet, 3000);
+      tab('history');
+    } else {
+      toast(`Failed: ${r.error}`, 'error');
+      con(`FAILED: ${r.error}`, 'error');
+    }
+  } catch (e) { toast('Network error', 'error'); }
+}
+
+async function callABIGetter(method) {
+  const name = document.getElementById('i-contract-select').value;
+  const target = deployedAddresses[name];
+  if (!target) return toast('No address for this contract.', 'warn');
+  
+  const resEl = document.getElementById(`res-${method}`);
+  resEl.innerText = 'Calling...';
+  
+  // Collect arguments
+  const args = [];
+  document.querySelectorAll(`input[data-get="${method}"]`).forEach(input => {
+    args.push(input.value);
+  });
+  
+  try {
+    const r = await fetch('/api/getter', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ target, method, args })
+    }).then(x => x.json());
+    
+    if (r.success) {
+      resEl.innerText = `Result: ${JSON.stringify(r.stack)}`;
+      con(`Getter "${method}" on ${target}: ${JSON.stringify(r.stack)}`, 'success');
+    } else {
+      resEl.innerText = `Error: ${r.error}`;
+      con(`Getter FAILED: ${r.error}`, 'error');
+    }
+  } catch (e) { resEl.innerText = 'Network error'; }
+}
+
+function setManualAddr() {
+  const name = document.getElementById('i-contract-select').value;
+  const addr = document.getElementById('manual-addr').value.trim();
+  if (!name) return toast('Select a contract type first.', 'warn');
+  if (!addr) return toast('Enter an address.', 'warn');
+  
+  deployedAddresses[name] = addr;
+  localStorage.setItem('tfm-deployed', JSON.stringify(deployedAddresses));
+  toast('Address updated!', 'success');
+  loadContractABI();
+}
+
+
+// ── Artifacts ─────────────────────────────────────────────────────────
+async function loadArts() {
+  try {
+    const r = await fetch('/api/artifacts').then(x=>x.json());
+    const el = document.getElementById('art-list');
+    if (!r.artifacts?.length) { el.innerHTML='<div class="empty">No artifacts. Compile to generate.</div>'; return; }
+    el.innerHTML = r.artifacts.map(a=>`
+      <div class="art">
+        <span class="art-name">${esc(a.name)}</span>
+        <span class="art-sz">${(a.size/1024).toFixed(1)} KB</span>
+      </div>`).join('');
+  } catch(e) { con('Artifacts load failed: '+e.message,'error'); }
+}
+
+// ── Status Bar ────────────────────────────────────────────────────────
+async function updateStatus() {
+  try {
+    const h = await fetch('/api/health').then(x=>x.json());
+    document.getElementById('sb-st').innerText  = h.status;
+    document.getElementById('sb-up').innerText  = fmtUp(h.uptime);
+    document.getElementById('sb-net').innerText = h.network;
+    dot(true);
+  } catch { dot(false); document.getElementById('sb-st').innerText='Offline'; }
+}
+function fmtUp(s) {
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60);
+  return `${h>0?h+'h ':''}${m>0?m+'m ':''}${sec}s`;
+}
+
+// ── Resizer ───────────────────────────────────────────────────────────
+(function(){
+  const r=document.getElementById('resizer'), l=document.getElementById('editor-pane');
+  let drag=false, sx, sw;
+  r.addEventListener('mousedown', e=>{drag=true;sx=e.clientX;sw=l.getBoundingClientRect().width;r.classList.add('drag');});
+  document.addEventListener('mousemove', e=>{if(!drag)return;const w=Math.max(260,Math.min(window.innerWidth-280,sw+e.clientX-sx));l.style.flex='none';l.style.width=w+'px';});
+  document.addEventListener('mouseup', ()=>{drag=false;r.classList.remove('drag');});
+})();
+
+// ── Monaco ────────────────────────────────────────────────────────────
+function clearEditor() {
+  if (confirm('Clear all code in the editor?')) {
+    editor.setValue('');
+    toast('Editor cleared', 'info');
+  }
+}
+
+async function pasteToEditor() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      editor.setValue(text);
+      toast('Pasted from clipboard', 'success');
+    }
+  } catch (e) {
+    toast('Clipboard access denied', 'error');
+  }
+}
+
+require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs' } });
+require(['vs/editor/editor.main'], ()=>{
+  monaco.languages.register({ id: 'tact' });
+  monaco.languages.setMonarchTokensProvider('tact', {
+    keywords: ['import','struct','message','contract','trait','init','receive','bounced','external','fun','get','self','return','with','as','let','if','else','while','repeat','do','until','try','catch','throw','override','virtual','abstract','extends','inline','native','asm','const','type','map','true','false','null','newAddress','emptyCell','emptySlice','send','nativeReserve','nativeSendMessage'],
+    typeKeywords: ['Int','Bool','String','Address','Cell','Slice','Builder','StringBuilder','SendParameters','StateInit','Context','uint8','uint16','uint32','uint64','uint128','uint256','int8','int16','int32','int64','int128','int256','coins'],
+    tokenizer: {
+      root: [
+        [/\/\/.*$/, 'comment'],
+        [/\/\*/, 'comment', '@bc'],
+        [/"/, 'string', '@str'],
+        [/\b(0x[0-9a-fA-F]+|\d+)\b/, 'number'],
+        [/[a-zA-Z_$][\w$]*/, { cases: { '@typeKeywords':'type', '@keywords':'keyword', '@default':'identifier' } }],
+        [/[{}()\[\]]/, '@brackets'],
+        [/[;,.]/, 'delimiter'],
+        [/[=!<>+\-*\/&|^~%]/, 'operator'],
+      ],
+      bc:  [ [/[^/*]+/,'comment'], [/\*\//,'comment','@pop'], [/[/*]/,'comment'] ],
+      str: [ [/[^\\"]+/,'string'], [/\\./,'string.escape'], [/"/,'string','@pop'] ],
+    }
+  });
+  monaco.languages.setLanguageConfiguration('tact', {
+    comments: { lineComment: '//', blockComment: ['/*','*/'] },
+    brackets: [['{','}'],['[',']'],['(',')']],
+    autoClosingPairs: [{open:'{',close:'}'},{open:'[',close:']'},{open:'(',close:')'},{open:'"',close:'"'}],
+  });
+
+  editor = monaco.editor.create(document.getElementById('editor'), {
+    value: `import "@stdlib/deploy";\n\nmessage Add {\n    amount: Int as uint32;\n}\n\ncontract Target with Deployable {\n    counter: Int as uint32;\n\n    init() {\n        self.counter = 0;\n    }\n\n    receive("increment") {\n        self.counter = self.counter + 1;\n    }\n\n    receive(msg: Add) {\n        self.counter = self.counter + msg.amount;\n    }\n\n    get fun counter(): Int {\n        return self.counter;\n    }\n}`,
+    language: 'tact', theme: 'vs-dark', automaticLayout: true,
+    minimap: { enabled: true, renderCharacters: false },
+    fontSize: 15, fontFamily: "'Fira Code','JetBrains Mono','Cascadia Code',monospace",
+    fontLigatures: true, cursorBlinking: 'smooth', cursorSmoothCaretAnimation: 'on',
+    smoothScrolling: true, padding: { top: 20, bottom: 20 }, wordWrap: 'on',
+    bracketPairColorization: { enabled: true }, tabSize: 4, insertSpaces: true,
+    renderWhitespace: 'selection', scrollBeyondLastLine: false,
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, compile);
+  editor.onDidChangeModelContent(()=> monaco.editor.setModelMarkers(editor.getModel(),'tact',[]));
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', ()=>{
+  connectWS(); loadWallet(); renderHist(); updateStatus(); loadContracts();
+  setInterval(loadWallet,   15000);
+  setInterval(updateStatus, 10000);
+});
+</script>
+</body>
+</html>
