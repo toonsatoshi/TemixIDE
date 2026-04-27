@@ -76,10 +76,10 @@ async function handleAction(bot, query) {
   }
 
   if (data === 'workspace_menu') {
-    return sendOrEdit(`📂 <b>Workspace</b>\nFocuses on your local environment and project history.\n\n📁 <b>Files:</b> Your central hub for managing .tact source files.\n📋 <b>History:</b> Tracking your previous deployments and interactions.\n⚙️ <b>Help:</b> Documentation and guides to help you navigate the IDE.`, {
+    return sendOrEdit(`📂 <b>Workspace</b>\nFocuses on your local environment and project history.\n\n📁 <b>Files:</b> Your central hub for managing .tact source files.\n📂 <b>Sessions:</b> Manage multiple project workspaces.\n📋 <b>History:</b> Tracking your previous deployments and interactions.\n⚙️ <b>Help:</b> Documentation and guides to help you navigate the IDE.`, {
       reply_markup: {
         inline_keyboard: [
-          [{ text: '📁 Files', callback_data: 'files_list' }],
+          [{ text: '📁 Files', callback_data: 'files_list' }, { text: '📂 Sessions', callback_data: 'sessions_menu' }],
           [{ text: '📋 History', callback_data: 'history' }],
           [{ text: '⚙️ Help', callback_data: 'help' }],
           [{ text: '⬅️ Back', callback_data: 'menu' }]
@@ -111,11 +111,50 @@ async function handleAction(bot, query) {
             ...(s !== 'default' ? [{ text: '🗑', callback_data: `confirm_del_session:${state.getShort(s)}` }] : [])
           ]),
           [{ text: '➕ New Session', callback_data: 'create_session' }],
-          [{ text: '⬅️ Back', callback_data: 'menu' }]
+          [{ text: '⬅️ Back', callback_data: 'workspace_menu' }]
         ]
       },
       parse_mode: 'HTML'
     });
+  }
+
+  if (data.startsWith('switch_session:')) {
+    const name = state.getLong(data.split(':')[1]);
+    if (state.switchSession(name)) {
+      bot.answerCallbackQuery(query.id, { text: `Switched to session: ${name}` });
+      return handleAction(bot, { ...query, data: 'sessions_menu' });
+    }
+  }
+
+  if (data === 'create_session') {
+    setUserState(chatId, { action: 'awaiting_session_name' });
+    return sendOrEdit(`➕ <b>Create New Session</b>\n\nPlease enter a name for your new session (alphanumeric only):`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Cancel', callback_data: 'sessions_menu' }]]
+      },
+      parse_mode: 'HTML'
+    });
+  }
+
+  if (data.startsWith('confirm_del_session:')) {
+    const name = state.getLong(data.split(':')[1]);
+    return sendOrEdit(`⚠️ <b>Delete Session: ${name}?</b>\n\nThis will permanently delete all files and history in this session. This action cannot be undone!`, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔥 YES, DELETE', callback_data: `delete_session:${state.getShort(name)}` }],
+          [{ text: '⬅️ No, Cancel', callback_data: 'sessions_menu' }]
+        ]
+      },
+      parse_mode: 'HTML'
+    });
+  }
+
+  if (data.startsWith('delete_session:')) {
+    const name = state.getLong(data.split(':')[1]);
+    if (state.deleteSession(name)) {
+      bot.answerCallbackQuery(query.id, { text: `Deleted session: ${name}` });
+      return handleAction(bot, { ...query, data: 'sessions_menu' });
+    }
   }
 
   if (data === 'wallet') {

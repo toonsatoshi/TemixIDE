@@ -76,6 +76,19 @@ The professional IDE for TON, now in your pocket.
                 logger.error('AI Forge Error', '', e);
                 bot.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${tonUtils.escapeHTML(e.message)}`, { parse_mode: 'HTML' });
               }
+            } else if (stateData.action === 'awaiting_session_name') {
+                const name = text.replace(/[^a-zA-Z0-9_-]/g, '');
+                if (!name) return bot.sendMessage(chatId, "❌ Invalid session name. Use alphanumeric characters only.");
+                
+                clearUserState(chatId);
+                if (state.createSession(name)) {
+                    bot.sendMessage(chatId, `✅ <b>Session "${name}" created and selected!</b>`, { 
+                        parse_mode: 'HTML',
+                        reply_markup: { inline_keyboard: [[{ text: '📂 Go to Sessions', callback_data: 'sessions_menu' }]] }
+                    });
+                } else {
+                    bot.sendMessage(chatId, `❌ Session "${name}" already exists.`);
+                }
             }
             // ... (other text handlers like awaiting_args etc)
         } catch (e) {

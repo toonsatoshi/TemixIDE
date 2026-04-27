@@ -104,6 +104,42 @@ function getLong(k) {
   return k;
 }
 
+function switchSession(name) {
+  if (state.sessions[name]) {
+    state.currentSession = name;
+    saveState();
+    return true;
+  }
+  return false;
+}
+
+function createSession(name) {
+  if (!state.sessions[name]) {
+    state.sessions[name] = { deployed: {}, lastFile: 'contract.tact', txHistory: [] };
+    state.currentSession = name;
+    saveState();
+    return true;
+  }
+  return false;
+}
+
+function deleteSession(name) {
+  if (name === 'default') return false;
+  if (state.sessions[name]) {
+    delete state.sessions[name];
+    if (state.currentSession === name) {
+      state.currentSession = 'default';
+    }
+    const sessionPath = path.join(SESSIONS_DIR, name);
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
+    }
+    saveState();
+    return true;
+  }
+  return false;
+}
+
 loadState();
 
 module.exports = {
@@ -115,5 +151,8 @@ module.exports = {
   saveState,
   addHistory,
   getShort,
-  getLong
+  getLong,
+  switchSession,
+  createSession,
+  deleteSession
 };
