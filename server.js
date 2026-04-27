@@ -1593,15 +1593,25 @@ The professional IDE for TON, now in your pocket.
         }
 
         else if (data === 'do_confirmed_tx') {
-            const stateData = getUserState(chatId);
-            if (!stateData || !stateData.target) return bot.sendMessage(chatId, "❌ Session expired.");
-            const { target, method, type, contractName, args, action } = stateData;
-            clearUserState(chatId);
+            try {
+                const stateData = getUserState(chatId);
+                if (!stateData || !stateData.target) {
+                    bot.answerCallbackQuery(query.id, { text: "Session expired.", show_alert: true });
+                    return bot.sendMessage(chatId, "❌ Session expired.");
+                }
+                
+                bot.answerCallbackQuery(query.id, { text: "Transaction confirmed. Signing..." });
+                const { target, method, type, contractName, args, action } = stateData;
+                clearUserState(chatId);
 
-            if (action === 'confirm_call') {
-                await handleCallGetter(chatId, target, method, contractName, args);
-            } else {
-                await handleSendMessage(chatId, target, type, contractName, args);
+                if (action === 'confirm_call') {
+                    await handleCallGetter(chatId, target, method, contractName, args);
+                } else {
+                    await handleSendMessage(chatId, target, type, contractName, args);
+                }
+            } catch (e) {
+                logger.error('Error in do_confirmed_tx', '', e);
+                bot.sendMessage(chatId, `❌ <b>Action Failed</b>\n\n${escapeHTML(e.message)}`, { parse_mode: 'HTML' });
             }
         }
         else if (data === 'do_reset') {
