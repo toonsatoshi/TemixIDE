@@ -336,6 +336,10 @@ try {
   if (savedDeployed) deployedAddresses = JSON.parse(savedDeployed);
 } catch(e) { console.error('Failed to load deployed addresses', e); }
 
+const LBL_C = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> Build Smart Contract';
+const LBL_D = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Deploy Selected Contract';
+const LBL_I = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Execute Transaction';
+
 // ── WebSocket ────────────────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -378,6 +382,7 @@ function toast(msg, type='info') {
 // ── Buttons ──────────────────────────────────────────────────────────
 function setBtn(id, busy, html) {
   const b = document.getElementById(id);
+  if (!b) return;
   b.disabled = busy; b.innerHTML = busy ? '⏳ Processing...' : html;
 }
 
@@ -434,11 +439,12 @@ async function resetWallet() {
 }
 
 // ── Compile ──────────────────────────────────────────────────────────
-const LBL_C = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> Build Smart Contract';
 async function compile() {
+  console.log('Compile initiated');
   setBtn('bc',true,''); toast('Compiling...','info'); con('Build initiated...','info'); tab('console');
   try {
     const r = await fetch('/api/compile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:editor.getValue()})}).then(x=>x.json());
+    console.log('Compile response:', r);
     if (r.success) {
       const metrics = r.bytecodeSize ? ` (${(r.bytecodeSize/1024).toFixed(1)} KB, hash: ${r.bytecodeHash.slice(0,8)}...)` : '';
       toast(`✓ Built in ${r.duration}ms!`,'success');
@@ -446,9 +452,13 @@ async function compile() {
       document.getElementById('clog').innerText = r.log||'';
       document.getElementById('clog-wrap').style.display='block';
       
+      const arts = await loadArts(); 
+      const contracts = await loadContracts(); 
+
       const firstContract = (r.artifacts||[]).find(a => a.endsWith('.code.boc'));
       if (firstContract) {
           const name = firstContract.replace('.code.boc', '');
+          console.log('First contract found:', name);
           const btnId = 'quick-dep-btn';
           if (document.getElementById(btnId)) document.getElementById(btnId).remove();
           
@@ -465,21 +475,22 @@ async function compile() {
                Build Successful!
             </div>
             <div style="font-size:12px; margin-bottom:10px;"><b>${name}</b> is ready for the blockchain.</div>
-            <button class="btn btn-p" onclick="document.getElementById('contract-select').value='${name}'; deploy(); this.parentElement.remove();">
+            <button id="bd-quick" class="btn btn-p" onclick="document.getElementById('contract-select').value='${name}'; deploy('bd-quick'); this.parentElement.remove();">
                🚀 Deploy ${name} Now
             </button>
           `;
           forgePanel.insertBefore(prompt, forgePanel.firstChild);
           tab('forge'); // Stay on forge to show the button
       }
-      
-      loadArts(); loadContracts(); 
     }
  else {
       toast('Build failed — check console.','error'); con('FAILED:\n'+r.error,'error');
       markErrors(r.error);
     }
-  } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
+  } catch(e) { 
+    console.error('Compile error:', e);
+    toast('Network error','error'); con('Net: '+e.message,'error'); 
+  }
   finally { setBtn('bc',false,LBL_C); }
 }
 
@@ -494,13 +505,15 @@ function markErrors(errText) {
 }
 
 // ── Deploy ───────────────────────────────────────────────────────────
-const LBL_D = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Deploy Selected Contract';
-async function deploy() {
-  const contractName = document.getElementById('contract-select').value;
-  if (!contractName) return toast('Please select a contract first.', 'warn');
-  
-  setBtn('bd',true,''); toast(`Deploying ${contractName}...`,'info'); con(`Deploy started for ${contractName}...`,'info'); tab('console');
+async function deploy(btnId = 'bd') {
+  console.log('Deploy button clicked:', btnId);
   try {
+    const contractName = document.getElementById('contract-select').value;
+    if (!contractName) return toast('Please select a contract first.', 'warn');
+    
+    const currentLbl = btnId === 'bd' ? LBL_D : (document.getElementById(btnId)?.innerHTML || 'Deploy');
+    setBtn(btnId,true,''); toast(`Deploying ${contractName}...`,'info'); con(`Deploy started for ${contractName}...`,'info'); tab('console');
+
     const r = await fetch('/api/deploy',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -532,8 +545,14 @@ async function deploy() {
       saveTx({type:'deploy',address:r.address,ts:new Date().toISOString(),seqno:r.seqno});
       setTimeout(loadWallet,3000); 
     } else { toast('Deploy failed: '+r.error,'error'); con('FAILED: '+r.error,'error'); }
-  } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
-  finally { setBtn('bd',false,LBL_D); }
+  } catch(e) { 
+    console.error('Deploy error:', e);
+    toast('Network error','error'); con('Net: '+e.message,'error'); 
+  }
+  finally { 
+    const currentLbl = btnId === 'bd' ? LBL_D : (document.getElementById(btnId)?.innerHTML || 'Deploy');
+    setBtn(btnId,false,currentLbl); 
+  }
 }
 
 function quickInteract(name) {
@@ -546,33 +565,37 @@ function quickGetters(name) {
 }
 
 // ── Interact ─────────────────────────────────────────────────────────
-const LBL_I = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Execute Transaction';
 async function interact() {
-  const target  = document.getElementById('t-addr').value.trim();
-  const message = document.getElementById('t-msg').value.trim();
-  const value   = document.getElementById('t-val').value.trim()||'0.02';
-  if (!target)  return toast('Target address required.','error');
-  if (!message) return toast('Message required.','error');
-  setBtn('bi',true,''); toast(`Sending "${message}"...`,'info');
+  console.log('Interact button clicked');
   try {
+    const target  = document.getElementById('t-addr').value.trim();
+    const message = document.getElementById('t-msg').value.trim();
+    const value   = document.getElementById('t-val').value.trim()||'0.02';
+    if (!target)  return toast('Target address required.','error');
+    if (!message) return toast('Message required.','error');
+    setBtn('bi',true,''); toast(`Sending "${message}"...`,'info');
     const r = await fetch('/api/interact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,message,value})}).then(x=>x.json());
     if (r.success) {
       toast('Transaction dispatched!','success'); con(`Sent "${message}" → ${target} (seqno:${r.seqno})`,'success');
       saveTx({type:'interact',target,message,value,ts:new Date().toISOString(),seqno:r.seqno});
       setTimeout(loadWallet,3000); tab('history');
     } else { toast('Failed: '+r.error,'error'); con('FAILED: '+r.error,'error'); }
-  } catch(e) { toast('Network error','error'); con('Net: '+e.message,'error'); }
+  } catch(e) { 
+    console.error('Interact error:', e);
+    toast('Network error','error'); con('Net: '+e.message,'error'); 
+  }
   finally { setBtn('bi',false,LBL_I); }
 }
 
 async function callGetter() {
-  const target = document.getElementById('g-addr').value.trim();
-  const method = document.getElementById('g-meth').value.trim();
-  const resEl  = document.getElementById('getter-result');
-  if (!target || !method) return toast('Address and Method required.', 'warn');
-  
-  setBtn('bg', true, '⏳'); resEl.innerText = 'Calling...';
+  console.log('callGetter button clicked');
   try {
+    const target = document.getElementById('g-addr').value.trim();
+    const method = document.getElementById('g-meth').value.trim();
+    const resEl  = document.getElementById('getter-result');
+    if (!target || !method) return toast('Address and Method required.', 'warn');
+    
+    setBtn('bg', true, '⏳'); resEl.innerText = 'Calling...';
     const r = await fetch('/api/getter', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -589,7 +612,10 @@ async function callGetter() {
       resEl.innerText = `Error: ${r.error}`;
       con(`Getter FAILED: ${r.error}`, 'error');
     }
-  } catch (e) { toast('Network error', 'error'); }
+  } catch (e) { 
+    console.error('callGetter error:', e);
+    toast('Network error', 'error'); 
+  }
   finally { setBtn('bg', false, '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Call Get Method'); }
 }
 
@@ -654,7 +680,8 @@ async function loadContracts() {
     iSel.innerHTML = '<option value="">(Select a contract)</option>' + (r.contracts?.length 
       ? r.contracts.map(c => `<option value="${esc(c)}">${esc(c.replace(/^Target_/, ''))}</option>`).join('')
       : '');
-  } catch(e) { con('Contracts list failed: '+e.message,'error'); }
+    return r.contracts || [];
+  } catch(e) { con('Contracts list failed: '+e.message,'error'); return []; }
 }
 
 async function loadContractABI() {
@@ -854,13 +881,14 @@ async function loadArts() {
   try {
     const r = await fetch('/api/artifacts').then(x=>x.json());
     const el = document.getElementById('art-list');
-    if (!r.artifacts?.length) { el.innerHTML='<div class="empty">No artifacts. Compile to generate.</div>'; return; }
+    if (!r.artifacts?.length) { el.innerHTML='<div class="empty">No artifacts. Compile to generate.</div>'; return []; }
     el.innerHTML = r.artifacts.map(a=>`
       <div class="art">
         <span class="art-name">${esc(a.name)}</span>
         <span class="art-sz">${(a.size/1024).toFixed(1)} KB</span>
       </div>`).join('');
-  } catch(e) { con('Artifacts load failed: '+e.message,'error'); }
+    return r.artifacts;
+  } catch(e) { con('Artifacts load failed: '+e.message,'error'); return []; }
 }
 
 // ── Status Bar ────────────────────────────────────────────────────────
