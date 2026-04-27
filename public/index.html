@@ -439,16 +439,29 @@ async function compile() {
           const name = firstContract.replace('.code.boc', '');
           const btnId = 'quick-dep-btn';
           if (document.getElementById(btnId)) document.getElementById(btnId).remove();
-          const btn = document.createElement('button');
-          btn.id = btnId;
-          btn.className = 'btn btn-p';
-          btn.style.marginTop = '10px';
-          btn.innerHTML = `🚀 Deploy ${name} Now`;
-          btn.onclick = () => { document.getElementById('contract-select').value = name; deploy(); };
-          document.getElementById('clog-wrap').appendChild(btn);
+          
+          // Add a special "Ready to Deploy" card at the top of Forge panel
+          const forgePanel = document.getElementById('tp-forge');
+          const prompt = document.createElement('div');
+          prompt.id = btnId;
+          prompt.className = 'card';
+          prompt.style.border = '1px solid var(--success-t)';
+          prompt.style.background = 'rgba(63,185,80,0.05)';
+          prompt.innerHTML = `
+            <div style="font-weight:700; color:var(--success-t); margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+               <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+               Build Successful!
+            </div>
+            <div style="font-size:12px; margin-bottom:10px;"><b>${name}</b> is ready for the blockchain.</div>
+            <button class="btn btn-p" onclick="document.getElementById('contract-select').value='${name}'; deploy(); this.parentElement.remove();">
+               🚀 Deploy ${name} Now
+            </button>
+          `;
+          forgePanel.insertBefore(prompt, forgePanel.firstChild);
+          tab('forge'); // Stay on forge to show the button
       }
       
-      loadArts(); loadContracts(); tab('build');
+      loadArts(); loadContracts(); 
     }
  else {
       toast('Build failed — check console.','error'); con('FAILED:\n'+r.error,'error');

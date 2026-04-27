@@ -1890,7 +1890,18 @@ The professional IDE for TON, now in your pocket.
                 const artifacts = fs.existsSync(buildDir) ? fs.readdirSync(buildDir).filter(f => f.startsWith(projectName)) : [];
                 
                 logger.info(`Bot compile OK: ${fileName} (${dur}ms)`);
-                bot.sendMessage(chatId, `✅ <b>Compiled ${fileName} in ${dur}ms</b>\n\n<b>Artifacts:</b> ${artifacts.map(a => `<code>${a.replace('.code.boc','')}</code>`).join(', ')}`, { parse_mode: 'HTML' });
+                const firstContract = artifacts.find(a => a.endsWith('.code.boc'));
+                const reply_markup = { inline_keyboard: [] };
+                if (firstContract) {
+                    const cName = firstContract.replace('.code.boc', '');
+                    reply_markup.inline_keyboard.push([{ text: `🚀 Deploy ${cName} Now`, callback_data: `prep_manual_deploy:${getShort(cName)}` }]);
+                }
+                reply_markup.inline_keyboard.push([{ text: '⬅️ Back to Menu', callback_data: 'menu' }]);
+
+                bot.sendMessage(chatId, `✅ <b>Compiled ${fileName} in ${dur}ms</b>\n\n<b>Artifacts:</b> ${artifacts.map(a => `<code>${a.replace('.code.boc','')}</code>`).join(', ')}`, { 
+                    parse_mode: 'HTML',
+                    reply_markup
+                });
             } finally {
                 if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
             }
