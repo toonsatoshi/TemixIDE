@@ -75,6 +75,10 @@ DESIGN RULES:
 
 async function generateAIContract(prompt) {
     if (!DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY not configured in .env');
+    
+    logger.info(`AI Contract Generation requested. Prompt length: ${prompt.length}`);
+    logger.trace(`AI Prompt: ${prompt}`);
+
     const response = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
         headers: {
@@ -93,11 +97,16 @@ async function generateAIContract(prompt) {
     
     if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(`DeepSeek API error: ${errData.error?.message || response.statusText}`);
+        const errMsg = errData.error?.message || response.statusText;
+        logger.error(`DeepSeek API error: ${errMsg}`, '', errData);
+        throw new Error(`DeepSeek API error: ${errMsg}`);
     }
     
     const data = await response.json();
     const content = data.choices[0].message.content.trim();
+    
+    logger.debug(`AI Response received. Content length: ${content.length}`);
+    logger.trace(`AI Full Content: ${content}`);
     
     const match = content.match(/^```tact\n([\s\S]*?)\n```$/) || content.match(/```tact\n([\s\S]*?)```/);
     if (!match) {
@@ -372,25 +381,33 @@ async function compileSilent(code, fileName, sessionPath) {
     };
     
     fs.writeFileSync(tempConfigPath, JSON.stringify(tempConfig));
+    logger.debug(`Starting silent compilation for verification: ${projectName}`, 'VERIFY');
     try {
-        execSync(`npx tact --config "${path.basename(tempConfigPath)}" 2>&1`, { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
+        const cmd = `npx tact --config "${path.basename(tempConfigPath)}" 2>&1`;
+        logger.trace(`Exec: ${cmd}`, 'VERIFY');
+        const out = execSync(cmd, { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
+        logger.debug(`Silent compilation successful`, 'VERIFY');
+        logger.trace(`Compiler Output:\n${out.toString()}`, 'VERIFY');
         
         const abiPath = path.join(buildVerifyDir, `${projectName}.abi`);
         let abi = null;
         if (fs.existsSync(abiPath)) {
             abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+            logger.trace(`ABI loaded for ${projectName}`, 'VERIFY');
         }
         return { success: true, abi };
     } catch (e) {
         const err = e.stdout ? e.stdout.toString() : e.message;
+        logger.warn(`Silent compilation failed`, 'VERIFY', err);
         return { success: false, error: parseTactError(err) };
     } finally {
         try {
             if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
             if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
             if (fs.existsSync(buildVerifyDir)) fs.rmSync(buildVerifyDir, { recursive: true, force: true });
+            logger.trace(`Cleanup verification artifacts for ${projectName}`, 'VERIFY');
         } catch (cleanupErr) {
-            logger.error('Cleanup failed', '', cleanupErr);
+            logger.error('Cleanup failed', 'VERIFY', cleanupErr);
         }
     }
 }
@@ -426,16 +443,32 @@ const BUILD_DIR   = path.join(__dirname, 'build');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
 // ─── Logger ──────────────────────────────────────────────────────────────
+const MAIN_LOG = path.join(LOG_DIR, 'server.log');
 const logger = {
-  info: (msg, id = '') => console.log(`\x1b[32m[INFO]${id ? ` [${id}]` : ''} ${msg}\x1b[0m`),
-  warn: (msg, id = '') => console.warn(`\x1b[33m[WARN]${id ? ` [${id}]` : ''} ${msg}\x1b[0m`),
-  error: (msg, id = '', err = null) => {
-    console.error(`\x1b[31m[ERROR]${id ? ` [${id}]` : ''} ${msg}\x1b[0m`);
-    if (err && DEBUG) console.error(err);
+  _write: (level, msg, id = '', err = null) => {
+    const ts = new Date().toISOString();
+    const prefix = `[${ts}] [${level}]${id ? ` [${id}]` : ''}`;
+    const line = `${prefix} ${msg}`;
+    
+    // Console output with colors
+    const colors = { INFO: '\x1b[32m', WARN: '\x1b[33m', ERROR: '\x1b[31m', DEBUG: '\x1b[36m', TRACE: '\x1b[90m' };
+    console.log(`${colors[level] || ''}${line}\x1b[0m`);
+    
+    if (err && (level === 'ERROR' || DEBUG)) {
+        console.error(err);
+    }
+
+    // File output
+    try {
+      fs.appendFileSync(MAIN_LOG, line + '\n');
+      if (err) fs.appendFileSync(MAIN_LOG, `${prefix} ERROR STACK: ${err.stack || err}\n`);
+    } catch (e) { /* ignore log failures */ }
   },
-  debug: (msg, id = '') => {
-    if (DEBUG) console.log(`\x1b[36m[DEBUG]${id ? ` [${id}]` : ''} ${msg}\x1b[0m`);
-  }
+  info: (msg, id = '') => logger._write('INFO', msg, id),
+  warn: (msg, id = '') => logger._write('WARN', msg, id),
+  error: (msg, id = '', err = null) => logger._write('ERROR', msg, id, err),
+  debug: (msg, id = '') => { if (DEBUG) logger._write('DEBUG', msg, id); },
+  trace: (msg, id = '') => { if (process.env.TRACE === 'true') logger._write('TRACE', msg, id); }
 };
 
 // ─── App & WebSocket ─────────────────────────────────────────────────────
@@ -445,7 +478,7 @@ const wss    = new WebSocketServer({ server });
 
 const wsBroadcast = (type, data) => {
   const payload = JSON.stringify({ type, data, ts: new Date().toISOString() });
-  logger.debug(`WS Broadcast: ${type} - ${typeof data === 'string' ? data.slice(0, 100) : 'object'}`);
+  logger.trace(`WS Broadcast: ${type} - ${typeof data === 'string' ? data.slice(0, 100) : 'object'}`);
   wss.clients.forEach(c => { if (c.readyState === 1) c.send(payload); });
 };
 
@@ -465,7 +498,7 @@ const broadcastToChannel = async (message) => {
   try {
     const bot = pollingBotInstance || (broadcastBotInstance ||= new TelegramBot(BOT_TOKEN, { polling: false }));
     await bot.sendMessage(CHANNEL_ID, message, { parse_mode: 'MarkdownV2' });
-    logger.debug(`Channel broadcast sent to ${CHANNEL_ID}`);
+    logger.trace(`Channel broadcast sent to ${CHANNEL_ID}`);
   } catch (e) {
     logger.error(`[Broadcast Error] ${e.message}`);
   }
@@ -482,10 +515,41 @@ app.use(compression());
 app.use((req, res, next) => { 
   req.requestId = uuidv4().slice(0, 8); 
   res.setHeader('X-Request-ID', req.requestId); 
-  logger.debug(`${req.method} ${req.path}`, req.requestId);
+  
+  const start = Date.now();
+  // Enhanced Request Logging
+  logger.info(`${req.method} ${req.path} - IP: ${req.ip} - User-Agent: ${req.get('User-Agent')}`, req.requestId);
+  
+  // Capture response body for logging
+  const oldWrite = res.write;
+  const oldEnd = res.end;
+  const chunks = [];
+
+  res.write = (...args) => {
+    chunks.push(Buffer.from(args[0]));
+    return oldWrite.apply(res, args);
+  };
+
+  res.end = (...args) => {
+    if (args[0]) chunks.push(Buffer.from(args[0]));
+    const body = Buffer.concat(chunks).toString('utf8');
+    const duration = Date.now() - start;
+    
+    logger.debug(`Response ${res.statusCode} (${duration}ms): ${body.length > 500 ? body.slice(0, 500) + '...' : body}`, req.requestId);
+    return oldEnd.apply(res, args);
+  };
+
   next(); 
 });
 app.use(express.json({ limit: '5mb' }));
+// Log request body after json parsing
+app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.body && Object.keys(req.body).length > 0) {
+        const bodyStr = JSON.stringify(req.body);
+        logger.debug(`Request Body: ${bodyStr.length > 1000 ? bodyStr.slice(0, 1000) + '...' : bodyStr}`, req.requestId);
+    }
+    next();
+});
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'DELETE'], allowedHeaders: ['Content-Type', 'X-Request-ID'] }));
 app.use(helmet({ contentSecurityPolicy: false })); 
 app.use(morgan('dev'));
@@ -612,6 +676,7 @@ async function withRetry(fn, retries = 10, id = '') {
   let lastErr;
   for (let i = 0; i < retries; i++) {
     try {
+      logger.trace(`RPC Call attempt ${i + 1}/${retries}`, id);
       return await fn();
     } catch (e) {
       lastErr = e;
@@ -623,14 +688,16 @@ async function withRetry(fn, retries = 10, id = '') {
 
       if (isRetryable) {
         const wait = (2000 * (i + 1)) + Math.random() * 1000; 
-        logger.warn(`RPC error: ${msg.slice(0,100)}. Retrying (${i+1}/${retries}) in ${Math.round(wait)}ms...`, id);
+        logger.warn(`RPC error (retryable): ${msg.slice(0,200)}. Retrying (${i+1}/${retries}) in ${Math.round(wait)}ms...`, id);
         wsBroadcast('warn', `RPC Error: ${msg.slice(0,50)}. Retrying (${i+1}/${retries})...`);
         await new Promise(r => setTimeout(r, wait));
       } else {
+        logger.error(`RPC error (non-retryable): ${msg}`, id, e);
         throw e;
       }
     }
   }
+  logger.error(`RPC max retries reached (${retries})`, id, lastErr);
   throw lastErr;
 }
 
@@ -678,9 +745,11 @@ function createTonClient(endpoint) {
 // ─── Initialization ──────────────────────────────────────────────────────
 async function init() {
   try {
+    logger.info('Initializing TemixIDE...');
     if (!CHANNEL_ID) {
       logger.warn('TELEGRAM_CHANNEL_ID not set — channel broadcast disabled.');
     }
+    
     let mnemonic;
     if (fs.existsSync(WALLET_FILE)) {
       const w = JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
@@ -692,30 +761,48 @@ async function init() {
       fs.writeFileSync(WALLET_FILE, JSON.stringify({ mnemonic, created: new Date().toISOString(), source: 'env' }, null, 2));
       logger.info('Wallet initialized from WALLET_MNEMONIC environment variable.');
     } else {
+      logger.info('Generating new development wallet...');
       mnemonic = await mnemonicNew();
       fs.writeFileSync(WALLET_FILE, JSON.stringify({ mnemonic, created: new Date().toISOString() }, null, 2));
       logger.warn('NEW wallet generated — fund it via the faucet before deploying.');
     }
+    
+    logger.trace('Deriving private key from mnemonic...');
     walletKey   = await mnemonicToPrivateKey(mnemonic);
+    
+    logger.trace('Selecting RPC endpoint...');
     const endpoint = await getEndpoint();
+    
+    logger.trace(`Initializing TON Client with endpoint: ${endpoint}`);
     tonClient   = createTonClient(endpoint);
+    
     devWallet   = WalletContractV4.create({ workchain: 0, publicKey: walletKey.publicKey });
+    logger.info(`Wallet Address: ${devWallet.address.toString({ testOnly: IS_TESTNET })}`);
+    
     initialized = true;
+    logger.trace('Initialization flag set to true');
 
     // Migration: Move existing .tact files and artifacts to sessions/default if they exist and sessions/default is empty
     const defaultSessionPath = path.join(SESSIONS_DIR, 'default');
-    if (!fs.existsSync(defaultSessionPath)) fs.mkdirSync(defaultSessionPath, { recursive: true });
+    if (!fs.existsSync(defaultSessionPath)) {
+        logger.trace(`Creating default session directory: ${defaultSessionPath}`);
+        fs.mkdirSync(defaultSessionPath, { recursive: true });
+    }
     
     const existingTactFiles = fs.readdirSync(__dirname).filter(f => f.endsWith('.tact') && f !== 'contract.tact');
     if (existingTactFiles.length > 0 && fs.readdirSync(defaultSessionPath).filter(f => f.endsWith('.tact')).length === 0) {
         logger.info(`Migrating ${existingTactFiles.length} files to sessions/default...`);
         existingTactFiles.forEach(f => {
-            try { fs.copyFileSync(path.join(__dirname, f), path.join(defaultSessionPath, f)); } catch (e) {}
+            try { 
+                logger.trace(`Copying ${f} to sessions/default`);
+                fs.copyFileSync(path.join(__dirname, f), path.join(defaultSessionPath, f)); 
+            } catch (e) { logger.error(`Migration failed for ${f}`, '', e); }
         });
         
         const buildDir = path.join(__dirname, 'build');
         const defaultBuildDir = path.join(defaultSessionPath, 'build');
         if (fs.existsSync(buildDir) && !fs.existsSync(defaultBuildDir)) {
+            logger.trace('Migrating build artifacts to sessions/default/build');
             fs.mkdirSync(defaultBuildDir, { recursive: true });
             fs.readdirSync(buildDir).forEach(f => {
                 try { fs.copyFileSync(path.join(buildDir, f), path.join(defaultBuildDir, f)); } catch (e) {}
@@ -725,6 +812,7 @@ async function init() {
         const logsDir = path.join(__dirname, 'logs');
         const defaultLogsDir = path.join(defaultSessionPath, 'logs');
         if (fs.existsSync(logsDir) && !fs.existsSync(defaultLogsDir)) {
+            logger.trace('Migrating logs to sessions/default/logs');
             fs.mkdirSync(defaultLogsDir, { recursive: true });
             fs.readdirSync(logsDir).forEach(f => {
                 try { fs.copyFileSync(path.join(logsDir, f), path.join(defaultLogsDir, f)); } catch (e) {}
@@ -819,7 +907,10 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
       wsBroadcast('log', `[${id}] Compilation started for session ${state.currentSession}`);
       
       const fileName = 'contract.tact';
-      fs.writeFileSync(path.join(sessionPath, fileName), code, 'utf8');
+      const fullFilePath = path.join(sessionPath, fileName);
+      fs.writeFileSync(fullFilePath, code, 'utf8');
+      logger.debug(`Saved source to ${fullFilePath}`, id);
+      
       const t0  = Date.now();
       
       // Use temporary config for compilation
@@ -833,16 +924,23 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
           }]
       };
       fs.writeFileSync(tempConfigPath, JSON.stringify(tempConfig));
+      logger.debug(`Created temporary config: ${tempConfigPath}`, id);
 
       try {
-        const out = execSync('npx tact --config api_temp_config.json 2>&1', { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
+        const cmd = 'npx tact --config api_temp_config.json 2>&1';
+        logger.trace(`Exec: ${cmd}`, id);
+        const out = execSync(cmd, { cwd: sessionPath, stdio: 'pipe', timeout: 60000 });
         const dur = Date.now() - t0;
         const log = out.toString();
+        
         wsBroadcast('compile-success', `Compiled in ${dur}ms`);
         fs.appendFileSync(path.join(logDir, 'compile.log'), `[${new Date().toISOString()}] OK (${dur}ms)\n${log}\n---\n`);
         logger.info(`Compilation OK in ${dur}ms`, id);
+        logger.trace(`Compiler Output:\n${log}`, id);
 
         const artifacts = fs.existsSync(buildDir) ? fs.readdirSync(buildDir) : [];
+        logger.debug(`Generated ${artifacts.length} artifacts in ${buildDir}`, id);
+        
         const resData = { success: true, duration: dur, log, artifacts };
 
         const bocFile = artifacts.find(f => f.endsWith('.code.boc'));
@@ -851,12 +949,15 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
                 const boc = fs.readFileSync(path.join(buildDir, bocFile));
                 resData.bytecodeSize = boc.length;
                 resData.bytecodeHash = crypto.createHash('sha256').update(boc).digest('hex');
+                logger.debug(`BOC Size: ${resData.bytecodeSize} bytes, Hash: ${resData.bytecodeHash}`, id);
             } catch (e) { logger.warn('Failed to read BOC for metrics', id, e); }
         }
 
         res.json(resData);
-        } finally {          if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
-      }
+        } finally {
+            if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
+            logger.trace(`Cleanup temporary config: ${tempConfigPath}`, id);
+        }
     }).catch((e) => {
       const errLog = e.stdout ? e.stdout.toString() : e.message;
       const logDir = getSessionLogDir();
@@ -868,7 +969,7 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
   } catch (e) {
     const errLog = e.stdout ? e.stdout.toString() : e.message;
     const logDir = getSessionLogDir();
-    logger.error('Compilation Error', id, e);
+    logger.error('Compilation Error (Synchronous)', id, e);
     wsBroadcast('compile-error', errLog);
     fs.appendFileSync(path.join(logDir, 'compile.log'), `[${new Date().toISOString()}] FAIL\n${errLog}\n---\n`);
     res.status(400).json({ error: errLog });
@@ -1019,15 +1120,17 @@ function packField(builder, field, value, abi) {
   const typeName = field.type.type;
   const isOptional = !!field.type.optional;
 
-  logger.debug(`Packing field ${field.name} (${typeName}, format: ${format}, optional: ${isOptional}) with value: ${JSON.stringify(value)}`);
+  logger.trace(`Packing field ${field.name} (${typeName}, format: ${format}, optional: ${isOptional}) with value: ${JSON.stringify(value)}`);
 
   try {
     if (isOptional) {
       if (value === undefined || value === null || value === '') {
+        logger.trace(`Optional field ${field.name} is empty, storing bit 0`);
         builder.storeBit(0);
         return;
       }
       builder.storeBit(1);
+      logger.trace(`Optional field ${field.name} has value, stored bit 1`);
     }
 
     switch (typeName) {
@@ -1038,8 +1141,10 @@ function packField(builder, field, value, abi) {
         }
         const bits = typeof format === 'number' ? format : (format === 'coins' ? 124 : 257);
         if (format === 'coins') {
+          logger.trace(`Storing coins: ${value}`);
           builder.storeCoins(BigInt(value));
         } else {
+          logger.trace(`Storing ${typeName} (${bits} bits): ${value}`);
           if (typeName === 'uint') builder.storeUint(BigInt(value), bits);
           else builder.storeInt(BigInt(value), bits);
         }
@@ -1050,6 +1155,7 @@ function packField(builder, field, value, abi) {
         try {
           const normalized = String(value).trim().replace(/\+/g, '-').replace(/\//g, '_');
           const parsed = Address.parseFriendly(normalized);
+          logger.trace(`Storing address: ${parsed.address.toString()}`);
           builder.storeAddress(parsed.address);
         } catch (e) {
           throw new Error(`Invalid address for "${field.name}": ${e.message}`);
@@ -1057,14 +1163,15 @@ function packField(builder, field, value, abi) {
         break;
       }
       case 'bool': {
-        builder.storeBit(value === true || value === 'true' || value === '1');
+        const boolVal = value === true || value === 'true' || value === '1';
+        logger.trace(`Storing bool: ${boolVal}`);
+        builder.storeBit(boolVal);
         break;
       }
       case 'string': {
         const strVal = String(value || '');
-        logger.debug(`Packing string: "${strVal}"`);
+        logger.trace(`Storing string: "${strVal}"`);
         const cell = beginCell().storeStringTail(strVal).endCell();
-        logger.debug(`String cell BOC (hex): ${cell.toBoc().toString('hex')}`);
         builder.storeRef(cell);
         break;
       }
@@ -1079,17 +1186,22 @@ function packField(builder, field, value, abi) {
           throw new Error(`Expected hex string or Buffer for "${field.name}"`);
         }
         if (buf.length !== size) throw new Error(`Expected ${size} bytes for "${field.name}", got ${buf.length}`);
+        logger.trace(`Storing ${size} fixed-bytes: ${buf.toString('hex')}`);
         builder.storeBuffer(buf);
         break;
       }
       case 'slice':
       case 'cell': {
         if (!value) {
-          if (typeName === 'cell') builder.storeRef(beginCell().endCell());
+          if (typeName === 'cell') {
+              logger.trace(`Empty cell for ${field.name}, storing empty cell ref`);
+              builder.storeRef(beginCell().endCell());
+          }
           else throw new Error(`Value for field "${field.name}" (slice) is required`);
         } else {
           try {
             const cell = Cell.fromBoc(Buffer.from(value, 'hex'))[0];
+            logger.trace(`Storing ${typeName} from BOC: ${value.slice(0, 64)}...`);
             if (typeName === 'cell') builder.storeRef(cell);
             else builder.storeSlice(cell.beginParse());
           } catch (e) {
@@ -1102,6 +1214,7 @@ function packField(builder, field, value, abi) {
         // Handle nested structs
         const nestedType = abi && abi.types ? abi.types.find(t => t.name === typeName) : null;
         if (nestedType) {
+          logger.trace(`Packing nested struct ${typeName} for field ${field.name}`);
           if (typeof value !== 'object' || value === null) {
             throw new Error(`Expected object for nested type "${typeName}" in field "${field.name}"`);
           }
@@ -1371,6 +1484,18 @@ init().then(() => {
     pollingBotInstance = bot;
     logger.info('Telegram Bot (TemixIDE) active.');
 
+    // General Bot Activity Logger
+    bot.on('message', (msg) => {
+        logger.debug(`Bot Message: from=${msg.from.id} (@${msg.from.username || 'N/A'}) text="${msg.text || '[non-text]'}"`);
+        if (msg.document) {
+            logger.debug(`Bot Document: name=${msg.document.file_name} mime=${msg.document.mime_type} size=${msg.document.file_size}`);
+        }
+    });
+
+    bot.on('callback_query', (query) => {
+        logger.debug(`Bot Callback: from=${query.from.id} (@${query.from.username || 'N/A'}) data="${query.data}"`);
+    });
+
     const isAuthorized = (msg) => {
       const authorized = state.authorizedUsers.length === 0 || state.authorizedUsers.includes(String(msg.from.id));
       if (!authorized) logger.warn(`Unauthorized access attempt from ${msg.from.id} (@${msg.from.username})`);
@@ -1596,11 +1721,11 @@ The professional IDE for TON, now in your pocket.
             try {
                 const stateData = getUserState(chatId);
                 if (!stateData || !stateData.target) {
-                    bot.answerCallbackQuery(query.id, { text: "Session expired.", show_alert: true });
+                    if (isQuery) bot.answerCallbackQuery(msgOrQuery.id, { text: "Session expired.", show_alert: true });
                     return bot.sendMessage(chatId, "❌ Session expired.");
                 }
                 
-                bot.answerCallbackQuery(query.id, { text: "Transaction confirmed. Signing..." });
+                if (isQuery) bot.answerCallbackQuery(msgOrQuery.id, { text: "Transaction confirmed. Signing..." });
                 const { target, method, type, contractName, args, action } = stateData;
                 clearUserState(chatId);
 
@@ -1832,7 +1957,7 @@ The professional IDE for TON, now in your pocket.
 
       try {
         // Handle simple menu navigation first
-        const simpleActions = ['forge_menu', 'contract_menu', 'workspace_menu', 'account_menu', 'sessions_menu', 'create_session', 'wallet', 'confirm_reset', 'do_reset', 'compile_menu', 'deploy_menu', 'interact_menu', 'prep_manual_int', 'health_check', 'getters_menu', 'files_list', 'logs_menu', 'artifacts_menu', 'history', 'help', 'menu'];
+        const simpleActions = ['forge_menu', 'ai_forge_menu', 'contract_menu', 'workspace_menu', 'account_menu', 'sessions_menu', 'create_session', 'wallet', 'view_seed', 'confirm_reset', 'do_confirmed_tx', 'do_reset', 'compile_menu', 'deploy_menu', 'interact_menu', 'prep_manual_int', 'health_check', 'getters_menu', 'files_list', 'logs_menu', 'artifacts_menu', 'history', 'help', 'menu'];
         if (simpleActions.includes(data)) {
             return handleMenuAction(chatId, data, query);
         }
