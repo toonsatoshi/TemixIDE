@@ -76,8 +76,8 @@ async function handleCallGetter(bot, chatId, target, method, contractName, args)
             return await client.runMethod(Address.parseFriendly(target).address, method, stack);
         });
 
-        if (result.exitCode !== 0 && result.exitCode !== undefined) {
-            let msg = `❌ *Call Failed:* Exit code \`${result.exitCode}\``;
+        if (result.exit_code !== 0 && result.exit_code !== undefined) {
+            let msg = `❌ *Call Failed:* Exit code \`${result.exit_code}\``;
             return bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
         }
 

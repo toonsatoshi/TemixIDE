@@ -241,9 +241,9 @@ router.post('/getter', heavyLimiter, requireInit, async (req, res) => {
       return await client.runMethod(parsedTarget.address, method, stack);
     }, 10, id);
 
-    if (result.exitCode !== 0 && result.exitCode !== undefined) {
-        let errorMsg = `Getter execution failed with exit code ${result.exitCode}`;
-        if (result.exitCode === 9) errorMsg += " (Cell underflow/Storage layout mismatch - check if contract is initialized/deployed correctly)";
+    if (result.exit_code !== 0 && result.exit_code !== undefined) {
+        let errorMsg = `Getter execution failed with exit code ${result.exit_code}`;
+        if (result.exit_code === 9) errorMsg += " (Cell underflow/Storage layout mismatch - check if contract is initialized/deployed correctly)";
         throw new Error(errorMsg);
     }
 

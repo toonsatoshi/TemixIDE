@@ -323,7 +323,18 @@
 <script>
 // ── State ────────────────────────────────────────────────────────────
 let editor, ws;
-let hist = JSON.parse(localStorage.getItem('tfm-hist') || '[]');
+let IS_TESTNET = true;
+let hist = [];
+try { 
+  const savedHist = localStorage.getItem('tfm-hist');
+  if (savedHist) hist = JSON.parse(savedHist); 
+} catch(e) { console.error('Failed to load history', e); }
+
+let deployedAddresses = {};
+try {
+  const savedDeployed = localStorage.getItem('tfm-deployed');
+  if (savedDeployed) deployedAddresses = JSON.parse(savedDeployed);
+} catch(e) { console.error('Failed to load deployed addresses', e); }
 
 // ── WebSocket ────────────────────────────────────────────────────────
 function connectWS() {
@@ -389,6 +400,7 @@ async function loadWallet() {
   try {
     const r = await fetch('/api/wallet').then(x=>x.json());
     if (r.address) {
+      IS_TESTNET = r.network === 'testnet';
       document.getElementById('w-addr').innerText = r.address;
       document.getElementById('w-bal').innerText  = `${r.balance} TON`;
       document.getElementById('w-meta').innerHTML = `Net: ${r.network} · ${r.walletVersion} · <a href="https://${r.network==='testnet'?'testnet.':''}tonscan.org/address/${r.address}" target="_blank">Explorer</a>`;
@@ -645,8 +657,6 @@ async function loadContracts() {
   } catch(e) { con('Contracts list failed: '+e.message,'error'); }
 }
 
-let deployedAddresses = JSON.parse(localStorage.getItem('tfm-deployed') || '{}');
-
 async function loadContractABI() {
   const name = document.getElementById('i-contract-select').value;
   const info = document.getElementById('i-contract-info');
@@ -857,6 +867,7 @@ async function loadArts() {
 async function updateStatus() {
   try {
     const h = await fetch('/api/health').then(x=>x.json());
+    IS_TESTNET = h.network === 'testnet';
     document.getElementById('sb-st').innerText  = h.status;
     document.getElementById('sb-up').innerText  = fmtUp(h.uptime);
     document.getElementById('sb-net').innerText = h.network;

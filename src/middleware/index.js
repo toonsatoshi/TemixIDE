@@ -33,7 +33,11 @@ const requireInit = (req, res, next) =>
 const heavyLimiter = rateLimit({ 
     windowMs: 60000, 
     max: 10, 
-    message: { error: 'Heavy endpoint: 10 req/min max.' } 
+    message: { error: 'Heavy endpoint: 10 req/min max.' },
+    handler: (req, res, next, opts) => {
+        logger.warn(`Heavy rate limit hit from ${req.ip}`, req.requestId);
+        res.status(429).json(opts.message);
+    }
 });
 
 const standardLimiter = rateLimit({
