@@ -244,10 +244,10 @@ If only one contract is needed, set "multi" to false and provide one entry in "c
     }
 }
 
-async function executeContractGeneration(chatId, prompt, statusMessageId) {
+async function executeContractGeneration(bot, chatId, prompt, statusMessageId) {
     const updateStatus = async (msg) => {
         try {
-            await pollingBotInstance.editMessageText(msg, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' });
+            await bot.editMessageText(msg, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' });
         } catch (e) { /* ignore edit errors */ }
     };
 
@@ -300,9 +300,9 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
         fs.writeFileSync(path.join(sessionPath, fileName), code);
         logger.info(`AI Generated contract: ${fileName} in session ${state.currentSession}`);
         
-        try { await pollingBotInstance.deleteMessage(chatId, statusMessageId); } catch(e){}
+        try { await bot.deleteMessage(chatId, statusMessageId); } catch(e){}
 
-        await pollingBotInstance.sendMessage(chatId, `✨ <b>Contract Generated & Verified!</b>\n\n<b>File:</b> <code>${fileName}</code>\n<b>Session:</b> <code>${state.currentSession}</code>\n\n\`\`\`tact\n${code.slice(0, 3000)}${code.length > 3000 ? '\n...(truncated)' : ''}\n\`\`\``, {
+        await bot.sendMessage(chatId, `✨ <b>Contract Generated & Verified!</b>\n\n<b>File:</b> <code>${fileName}</code>\n<b>Session:</b> <code>${state.currentSession}</code>\n\n\`\`\`tact\n${code.slice(0, 3000)}${code.length > 3000 ? '\n...(truncated)' : ''}\n\`\`\``, {
             parse_mode: 'HTML',
             reply_markup: {
                 inline_keyboard: [[{ text: '🔨 Compile Now', callback_data: `do_compile:${getShort(fileName)}` }]]
@@ -324,7 +324,7 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
             });
         }
 
-        await pollingBotInstance.sendMessage(chatId, `📖 <b>Usage Guide for ${contractName}</b>\n\n${guide}`, {
+        await bot.sendMessage(chatId, `📖 <b>Usage Guide for ${contractName}</b>\n\n${guide}`, {
             parse_mode: 'HTML',
             reply_markup: buttons.length > 0 ? {
                 inline_keyboard: [
@@ -337,8 +337,8 @@ async function executeContractGeneration(chatId, prompt, statusMessageId) {
         return { success: true, contractName };
     } catch (e) {
         logger.error('executeContractGeneration failed', '', e);
-        try { await pollingBotInstance.editMessageText(`❌ <b>AI Forge Failed</b>\n\n${e.message}`, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' }); }
-        catch(e2) { pollingBotInstance.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${e.message}`, { parse_mode: 'HTML' }); }
+        try { await bot.editMessageText(`❌ <b>AI Forge Failed</b>\n\n${escapeHtml(e.message)}`, { chat_id: chatId, message_id: statusMessageId, parse_mode: 'HTML' }); }
+        catch(e2) { bot.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${escapeHtml(e.message)}`, { parse_mode: 'HTML' }); }
         return { success: false, error: e.message };
     }
 }
@@ -397,8 +397,8 @@ async function compileSilent(code, fileName, sessionPath) {
         }
         return { success: true, abi };
     } catch (e) {
-        const err = e.stdout ? e.stdout.toString() : e.message;
-        logger.warn(`Silent compilation failed`, 'VERIFY', err);
+        const err = e.stdout ? e.stdout.toString('utf8') : e.message;
+        logger.error(`Silent compilation failed: ${err}`, 'VERIFY', e);
         return { success: false, error: parseTactError(err) };
     } finally {
         try {
@@ -424,6 +424,14 @@ const safeJsonParse = (str) => {
     .replace(/[\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]/g, ' '); // Other exotic spaces
   return JSON.parse(sanitized);
 };
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 const escapeHTML = (str) => {
   return String(str || '')
@@ -746,7 +754,7 @@ function createTonClient(endpoint) {
 async function init() {
   try {
     logger.info('Initializing TemixIDE...');
-    if (!CHANNEL_ID) {
+    if (!process.env.TELEGRAM_CHANNEL_ID) {
       logger.warn('TELEGRAM_CHANNEL_ID not set — channel broadcast disabled.');
     }
     
@@ -959,17 +967,17 @@ app.post('/api/compile', heavyLimiter, requireInit, (req, res) => {
             logger.trace(`Cleanup temporary config: ${tempConfigPath}`, id);
         }
     }).catch((e) => {
-      const errLog = e.stdout ? e.stdout.toString() : e.message;
+      const errLog = e.stdout ? e.stdout.toString('utf8') : e.message;
       const logDir = getSessionLogDir();
-      logger.error('Compilation FAILED', id, e);
+      logger.error(`Compilation FAILED: ${errLog}`, id, e);
       wsBroadcast('compile-error', errLog);
       fs.appendFileSync(path.join(logDir, 'compile.log'), `[${new Date().toISOString()}] FAIL\n${errLog}\n---\n`);
       res.status(400).json({ error: errLog });
     });
   } catch (e) {
-    const errLog = e.stdout ? e.stdout.toString() : e.message;
+    const errLog = e.stdout ? e.stdout.toString('utf8') : e.message;
     const logDir = getSessionLogDir();
-    logger.error('Compilation Error (Synchronous)', id, e);
+    logger.error(`Compilation Error (Synchronous): ${errLog}`, id, e);
     wsBroadcast('compile-error', errLog);
     fs.appendFileSync(path.join(logDir, 'compile.log'), `[${new Date().toISOString()}] FAIL\n${errLog}\n---\n`);
     res.status(400).json({ error: errLog });
@@ -1575,9 +1583,9 @@ The professional IDE for TON, now in your pocket.
         { command: 'help', description: 'Show help guide' }
     ]);
 
-    const handleMenuAction = async (chatId, data, msgOrQuery) => {
-      const isQuery = !!msgOrQuery.id;
-      const messageId = isQuery ? msgOrQuery.message.message_id : null;
+    const handleMenuAction = async (bot, chatId, data, query) => {
+      const isQuery = !!(query && query.id);
+      const messageId = (isQuery && query.message) ? query.message.message_id : null;
       logger.debug(`Menu action: ${data} (chat: ${chatId})`);
 
       const sendOrEdit = async (text, options) => {
@@ -1721,11 +1729,11 @@ The professional IDE for TON, now in your pocket.
             try {
                 const stateData = getUserState(chatId);
                 if (!stateData || !stateData.target) {
-                    if (isQuery) bot.answerCallbackQuery(msgOrQuery.id, { text: "Session expired.", show_alert: true });
+                    if (isQuery) bot.answerCallbackQuery(query.id, { text: "Session expired.", show_alert: true });
                     return bot.sendMessage(chatId, "❌ Session expired.");
                 }
                 
-                if (isQuery) bot.answerCallbackQuery(msgOrQuery.id, { text: "Transaction confirmed. Signing..." });
+                if (isQuery) bot.answerCallbackQuery(query.id, { text: "Transaction confirmed. Signing..." });
                 const { target, method, type, contractName, args, action } = stateData;
                 clearUserState(chatId);
 
@@ -1736,7 +1744,7 @@ The professional IDE for TON, now in your pocket.
                 }
             } catch (e) {
                 logger.error('Error in do_confirmed_tx', '', e);
-                bot.sendMessage(chatId, `❌ <b>Action Failed</b>\n\n${escapeHTML(e.message)}`, { parse_mode: 'HTML' });
+                bot.sendMessage(chatId, `❌ <b>Action Failed</b>\n\n${escapeHtml(e.message)}`, { parse_mode: 'HTML' });
             }
         }
         else if (data === 'do_reset') {
@@ -1959,7 +1967,7 @@ The professional IDE for TON, now in your pocket.
         // Handle simple menu navigation first
         const simpleActions = ['forge_menu', 'ai_forge_menu', 'contract_menu', 'workspace_menu', 'account_menu', 'sessions_menu', 'create_session', 'wallet', 'view_seed', 'confirm_reset', 'do_confirmed_tx', 'do_reset', 'compile_menu', 'deploy_menu', 'interact_menu', 'prep_manual_int', 'health_check', 'getters_menu', 'files_list', 'logs_menu', 'artifacts_menu', 'history', 'help', 'menu'];
         if (simpleActions.includes(data)) {
-            return handleMenuAction(chatId, data, query);
+            return handleMenuAction(bot, chatId, data, query);
         }
 
         else if (data === 'do_multi_generate') {
@@ -1977,7 +1985,7 @@ The professional IDE for TON, now in your pocket.
               for (let i = 0; i < plan.length; i++) {
                   const contractInfo = plan[i];
                   const tempStatus = await bot.sendMessage(chatId, `🧠 <b>Temix IDE: Working on ${i+1}/${plan.length} - ${contractInfo.name}...</b>`, { parse_mode: 'HTML' });
-                  await executeContractGeneration(chatId, contractInfo.prompt, tempStatus.message_id);
+                      await executeContractGeneration(bot, chatId, contractInfo.prompt, tempStatus.message_id);
               }
               bot.sendMessage(chatId, "✅ <b>Multi-contract generation complete!</b>", { parse_mode: 'HTML' });
           })();
@@ -2041,9 +2049,9 @@ The professional IDE for TON, now in your pocket.
                 if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
             }
           }).catch((e) => {
-            const err = e.stdout ? e.stdout.toString() : e.message;
-            logger.error(`Bot compile FAIL: ${fileName}`, '', e);
-            bot.sendMessage(chatId, `❌ <b>Compilation Failed</b>\n\n<pre>${escapeHTML(err.slice(0, 3000))}</pre>`, { parse_mode: 'HTML' });
+            const err = e.stdout ? e.stdout.toString('utf8') : e.message;
+            logger.error(`Bot compile FAIL: ${fileName} - ${err}`, '', e);
+            bot.sendMessage(chatId, `❌ <b>Compilation Failed</b>\n\n<pre>${escapeHtml(err.slice(0, 3000))}</pre>`, { parse_mode: 'HTML' });
           });
         }
 
@@ -2052,7 +2060,7 @@ The professional IDE for TON, now in your pocket.
           state.currentSession = sessionName;
           saveState();
           bot.sendMessage(chatId, `✅ Switched to session: <code>${sessionName}</code>`, { parse_mode: 'HTML' });
-          handleMenuAction(chatId, 'sessions_menu', query);
+          handleMenuAction(bot, chatId, 'sessions_menu', query);
         }
 
         else if (data.startsWith('confirm_del_session:')) {
@@ -2087,7 +2095,7 @@ The professional IDE for TON, now in your pocket.
             saveState();
             
             bot.answerCallbackQuery(query.id, { text: `Session ${sessionName} deleted.` });
-            handleMenuAction(chatId, 'sessions_menu', query);
+            handleMenuAction(bot, chatId, 'sessions_menu', query);
           } catch (e) {
             logger.error(`Failed to delete session ${sessionName}`, '', e);
             bot.sendMessage(chatId, `❌ Failed to delete session: ${e.message}`);
@@ -2415,7 +2423,7 @@ The professional IDE for TON, now in your pocket.
                 }
             }
             
-            if (!code && !isError) return pollingBotInstance.sendMessage(chatId, "❌ Source code not found in session.");
+            if (!code && !isError) return bot.sendMessage(chatId, "❌ Source code not found in session.");
             if (!code) code = "[Source not found]";
 
             const statusText = isError ? "🤖 <b>AI is investigating the failure...</b>" : "🤖 <b>AI is analyzing the contract...</b>";
@@ -2459,7 +2467,7 @@ The professional IDE for TON, now in your pocket.
                 const title = isError ? `🔍 <b>AI Failure Analysis for ${name}</b>` : `📖 <b>AI Explanation for ${name}</b>`;
                 bot.sendMessage(chatId, `${title}\n\n${explanation}`, { parse_mode: 'HTML' });
             } catch (e) {
-                bot.sendMessage(chatId, `❌ AI Analysis failed: ${e.message}`);
+                bot.sendMessage(chatId, `❌ <b>AI Analysis failed</b>\n\n${escapeHtml(e.message)}`, { parse_mode: 'HTML' });
             }
         }
 
@@ -2538,7 +2546,7 @@ The professional IDE for TON, now in your pocket.
             bot.sendMessage(chatId, `🎉 <b>Contract Deployed!</b>\n\n<b>Name:</b> <code>${name}</code>\n<b>Address:</b> <code>${addrStr}</code>\n<a href="https://${IS_TESTNET?'testnet.':''}tonscan.org/address/${addrStr}">View on Explorer</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
         } catch (e) {
             logger.error(`Bot deploy FAIL: ${name}`, '', e);
-            bot.sendMessage(chatId, "❌ <b>Deployment Failed</b>\n\n" + e.message);
+            bot.sendMessage(chatId, "❌ <b>Deployment Failed</b>\n\n" + escapeHtml(e.message), { parse_mode: 'HTML' });
         }
     }
 
@@ -2660,7 +2668,7 @@ The professional IDE for TON, now in your pocket.
           '📦 Artifacts': 'artifacts_menu', '⚙️ Help': 'help', '✨ AI Forge': 'ai_forge_menu'
         };
 
-        if (menuActions[text]) return handleMenuAction(chatId, menuActions[text], msg);
+        if (menuActions[text]) return handleMenuAction(bot, chatId, menuActions[text], msg);
 
         // Handle direct commands (e.g., /send_Reset {"val":1}, /call_get_balance [123], /deploy_Counter {"val":0})
         if (text.startsWith('/send_') || text.startsWith('/call_') || text.startsWith('/deploy_')) {
@@ -2764,9 +2772,10 @@ The professional IDE for TON, now in your pocket.
               saveState();
               clearUserState(chatId);
               bot.sendMessage(chatId, `✅ Session <code>${name}</code> created and activated.`, { parse_mode: 'HTML' });
-              return handleMenuAction(chatId, 'sessions_menu', msg);
+              return handleMenuAction(bot, chatId, 'sessions_menu', msg);
             }
             else if (stateData.action === 'awaiting_ai_prompt') {
+              getSession();
               const originalPrompt = text;
               clearUserState(chatId);
               const statusMsg = await bot.sendMessage(chatId, "🧠 <b>Temix IDE: Analyzing requirements...</b>", { parse_mode: 'HTML' });
@@ -2779,7 +2788,8 @@ The professional IDE for TON, now in your pocket.
 
               try {
                 const analysis = await analyzeAIRequirement(originalPrompt);
-                
+                if (!analysis) throw new Error('AI analysis failed to return a plan.');
+
                 if (analysis.multi) {
                   const contractsList = analysis.contracts.map(c => `• <b>${c.name}</b>: ${c.purpose}`).join('\n');
                   const text = `🚨 <b>Multi-Contract Requirement Detected</b>\n\n${analysis.explanation}\n\n<b>Proposed Architecture:</b>\n${contractsList}\n\nWould you like Temix IDE to generate these contracts one by one?`;
@@ -2803,12 +2813,12 @@ The professional IDE for TON, now in your pocket.
                 }
 
                 // Single contract flow
-                await executeContractGeneration(chatId, analysis.contracts[0].prompt, statusMsg.message_id);
+                await executeContractGeneration(bot, chatId, analysis.contracts[0].prompt, statusMsg.message_id);
 
               } catch (e) {
                 logger.error('AI Forge Error', '', e);
-                try { await bot.editMessageText(`❌ <b>AI Forge Failed</b>\n\n${e.message}`, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }); }
-                catch(e2) { bot.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${e.message}`, { parse_mode: 'HTML' }); }
+                try { await bot.editMessageText(`❌ <b>AI Forge Failed</b>\n\n${escapeHtml(e.message)}`, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }); }
+                catch(e2) { bot.sendMessage(chatId, `❌ <b>AI Forge Failed</b>\n\n${escapeHtml(e.message)}`, { parse_mode: 'HTML' }); }
               }
               return;
             }
@@ -2934,10 +2944,10 @@ The professional IDE for TON, now in your pocket.
     });
 
     // Legacy Text Commands (Forward to Menu)
-    bot.onText(/\/wallet/, (msg) => { if (isAuthorized(msg)) handleMenuAction(msg.chat.id, 'wallet', msg); });
-    bot.onText(/\/compile/, (msg) => { if (isAuthorized(msg)) handleMenuAction(msg.chat.id, 'compile_menu', msg); });
-    bot.onText(/\/deploy/, (msg) => { if (isAuthorized(msg)) handleMenuAction(msg.chat.id, 'deploy_menu', msg); });
-    bot.onText(/\/help/, (msg) => { if (isAuthorized(msg)) handleMenuAction(msg.chat.id, 'help', msg); });
+    bot.onText(/\/wallet/, (msg) => { if (isAuthorized(msg)) handleMenuAction(bot, msg.chat.id, 'wallet', msg); });
+    bot.onText(/\/compile/, (msg) => { if (isAuthorized(msg)) handleMenuAction(bot, msg.chat.id, 'compile_menu', msg); });
+    bot.onText(/\/deploy/, (msg) => { if (isAuthorized(msg)) handleMenuAction(bot, msg.chat.id, 'deploy_menu', msg); });
+    bot.onText(/\/help/, (msg) => { if (isAuthorized(msg)) handleMenuAction(bot, msg.chat.id, 'help', msg); });
 
     // Handle File Uploads (Dynamic Filename)
     bot.on('document', async (msg) => {
