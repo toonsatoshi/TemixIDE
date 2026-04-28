@@ -308,6 +308,138 @@ async function handleAction(bot, query) {
     });
   }
 
+  if (data.startsWith('int_methods:')) {
+      const name = state.getLong(data.split(':')[1]);
+      const buildDir = state.getSessionBuildDir();
+      let abiPath = path.join(buildDir, `${name}.abi`);
+      
+      if (!fs.existsSync(abiPath)) {
+          const files = fs.readdirSync(buildDir);
+          const match = files.find(f => f.endsWith(`_${name}.abi`) || f === `${name}.abi`);
+          if (match) abiPath = path.join(buildDir, match);
+      }
+      
+      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${name}. Try compiling first.`);
+      
+      const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+      const buttons = [];
+      (abi.receivers || []).forEach(r => {
+          if (r.receiver === 'internal') {
+              const label = r.message.type === 'text' ? `✉️ "${r.message.text}"` : `✉️ ${r.message.type}`;
+              buttons.push([{ text: label, callback_data: `prep_int:${state.getShort(name)}:${state.getShort(r.message.type)}:${state.getShort(r.message.text || '')}` }]);
+          }
+      });
+      
+      return sendOrEdit(`🎮 <b>Interact with ${name}</b>\nSelect a message type to send:`, {
+          reply_markup: { inline_keyboard: [...buttons, [{ text: '⬅️ Back', callback_data: 'interact_menu' }]] },
+          parse_mode: 'HTML'
+      });
+  }
+
+  if (data.startsWith('get_methods:')) {
+      const name = state.getLong(data.split(':')[1]);
+      const buildDir = state.getSessionBuildDir();
+      let abiPath = path.join(buildDir, `${name}.abi`);
+      
+      if (!fs.existsSync(abiPath)) {
+          const files = fs.readdirSync(buildDir);
+          const match = files.find(f => f.endsWith(`_${name}.abi`) || f === `${name}.abi`);
+          if (match) abiPath = path.join(buildDir, match);
+      }
+      
+      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${name}.`);
+      
+      const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+      const buttons = [];
+      (abi.getters || []).forEach(g => {
+          buttons.push([{ text: `🔍 ${g.name}()`, callback_data: `call_get:${state.getShort(name)}:${state.getShort(g.name)}` }]);
+      });
+      
+      return sendOrEdit(`🔍 <b>Getters for ${name}</b>\nSelect a method to call:`, {
+          reply_markup: { inline_keyboard: [...buttons, [{ text: '⬅️ Back', callback_data: 'getters_menu' }]] },
+          parse_mode: 'HTML'
+      });
+  }
+
+  if (data.startsWith('prep_int:')) {
+      const [_, cShort, typeShort, textShort] = data.split(':');
+      const cName = state.getLong(cShort);
+      const type = state.getLong(typeShort);
+      const text = state.getLong(textShort);
+      const target = state.getSession().deployed[cName];
+      const buildDir = state.getSessionBuildDir();
+      let abiPath = path.join(buildDir, `${cName}.abi`);
+      
+      if (!fs.existsSync(abiPath)) {
+          const files = fs.readdirSync(buildDir);
+          const match = files.find(f => f.endsWith(`_${cName}.abi`) || f === `${cName}.abi`);
+          if (match) abiPath = path.join(buildDir, match);
+      }
+      
+      if (type === 'text') {
+          return bot.sendMessage(chatId, `✉️ <b>Send Text Message?</b>\n\nContract: <code>${cName}</code>\nTarget: <code>${target}</code>\nMessage: <code>"${text}"</code>`, {
+              parse_mode: 'HTML',
+              reply_markup: {
+                  inline_keyboard: [[{ text: '🚀 Send Now', callback_data: `do_int:${cShort}:${typeShort}:${textShort}` }], [{ text: '⬅️ Cancel', callback_data: 'menu' }]]
+              }
+          });
+      } else {
+          // Typed message - needs arguments
+          if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${cName}.`);
+          const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+          const typeDef = abi.types.find(t => t.name === type);
+          if (!typeDef || !typeDef.fields || typeDef.fields.length === 0) {
+              return bot.sendMessage(chatId, `✉️ <b>Send Message ${type}?</b>\n\nTarget: <code>${target}</code>`, {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                      inline_keyboard: [[{ text: '🚀 Send Now', callback_data: `do_int:${cShort}:${typeShort}:${textShort}` }], [{ text: '⬅️ Cancel', callback_data: 'menu' }]]
+                  }
+              });
+          }
+          
+          setUserState(chatId, { action: 'awaiting_args', cName, type, target, fields: typeDef.fields, currentField: 0, args: {} });
+          return bot.sendMessage(chatId, `⌨️ <b>Enter arguments for ${type}:</b>\n\nField: <code>${typeDef.fields[0].name}</code> (${typeDef.fields[0].type.type})`, { parse_mode: 'HTML' });
+      }
+  }
+
+  if (data.startsWith('call_get:')) {
+      const [_, cShort, gShort] = data.split(':');
+      const cName = state.getLong(cShort);
+      const method = state.getLong(gShort);
+      const target = state.getSession().deployed[cName];
+      const buildDir = state.getSessionBuildDir();
+      let abiPath = path.join(buildDir, `${cName}.abi`);
+      
+      if (!fs.existsSync(abiPath)) {
+          const files = fs.readdirSync(buildDir);
+          const match = files.find(f => f.endsWith(`_${cName}.abi`) || f === `${cName}.abi`);
+          if (match) abiPath = path.join(buildDir, match);
+      }
+      
+      if (!fs.existsSync(abiPath)) return bot.sendMessage(chatId, `❌ ABI not found for ${cName}.`);
+      const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+      const getter = abi.getters.find(g => g.name === method);
+      
+      if (getter.arguments && getter.arguments.length > 0) {
+          setUserState(chatId, { action: 'awaiting_get_args', cName, method, target, fields: getter.arguments, currentField: 0, args: [] });
+          return bot.sendMessage(chatId, `⌨️ <b>Enter arguments for ${method}():</b>\n\nField: <code>${getter.arguments[0].name}</code>`, { parse_mode: 'HTML' });
+      }
+      
+      const { handleCallGetter } = require('./ton-actions');
+      await handleCallGetter(bot, chatId, target, method, cName, []);
+  }
+
+  if (data.startsWith('do_int:')) {
+      const [_, cShort, typeShort, textShort] = data.split(':');
+      const cName = state.getLong(cShort);
+      const type = state.getLong(typeShort);
+      const text = state.getLong(textShort);
+      const target = state.getSession().deployed[cName];
+      
+      const { handleSendMessage } = require('./ton-actions');
+      await handleSendMessage(bot, chatId, target, type, cName, { text });
+  }
+
   if (data.startsWith('prep_manual_deploy:')) {
     const name = state.getLong(data.split(':')[1]);
     return bot.sendMessage(chatId, `🚀 <b>Ready to deploy ${name}?</b>\n\nThis will use 0.05 TON to deploy the contract on ${config.NETWORK.toUpperCase()}.`, {
@@ -325,8 +457,6 @@ async function handleAction(bot, query) {
     const name = state.getLong(data.split(':')[1]);
     await handleDoDeploy(bot, chatId, name);
   }
-
-  // ... (rest of actions logic)
 }
 
 async function handleDoDeploy(bot, chatId, name, args = {}) {
