@@ -89,8 +89,33 @@ The professional IDE for TON, now in your pocket.
                 } else {
                     bot.sendMessage(chatId, `❌ Session "${name}" already exists.`);
                 }
+            } else if (stateData.action === 'awaiting_args') {
+                const { cName, type, target, fields, currentField, args } = stateData;
+                args[fields[currentField].name] = text;
+                
+                if (currentField + 1 < fields.length) {
+                    const nextField = fields[currentField + 1];
+                    setUserState(chatId, { ...stateData, currentField: currentField + 1, args });
+                    return bot.sendMessage(chatId, `⌨️ <b>Enter value for ${nextField.name}:</b> (${nextField.type.type})`, { parse_mode: 'HTML' });
+                } else {
+                    clearUserState(chatId);
+                    bot.sendMessage(chatId, `🚀 <b>Sending ${type} to ${cName}...</b>`, { parse_mode: 'HTML' });
+                    await handleSendMessage(bot, chatId, target, type, cName, args);
+                }
+            } else if (stateData.action === 'awaiting_get_args') {
+                const { cName, method, target, fields, currentField, args } = stateData;
+                args.push(text);
+                
+                if (currentField + 1 < fields.length) {
+                    const nextField = fields[currentField + 1];
+                    setUserState(chatId, { ...stateData, currentField: currentField + 1, args });
+                    return bot.sendMessage(chatId, `⌨️ <b>Enter value for ${nextField.name}:</b>`, { parse_mode: 'HTML' });
+                } else {
+                    clearUserState(chatId);
+                    bot.sendMessage(chatId, `🔍 <b>Calling ${cName}.${method}()...</b>`, { parse_mode: 'HTML' });
+                    await handleCallGetter(bot, chatId, target, method, cName, args);
+                }
             }
-            // ... (other text handlers like awaiting_args etc)
         } catch (e) {
             logger.error('Bot input error', '', e);
             bot.sendMessage(chatId, `❌ *Input Error:* ${e.message}`);
