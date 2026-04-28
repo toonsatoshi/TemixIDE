@@ -308,6 +308,19 @@ async function handleAction(bot, query) {
     });
   }
 
+  if (data.startsWith('prep_manual_deploy:')) {
+    const name = state.getLong(data.split(':')[1]);
+    return bot.sendMessage(chatId, `🚀 <b>Ready to deploy ${name}?</b>\n\nThis will use 0.05 TON to deploy the contract on ${config.NETWORK.toUpperCase()}.`, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '✅ Confirm & Deploy', callback_data: `do_deploy:${state.getShort(name)}` }],
+          [{ text: '⬅️ Back', callback_data: 'deploy_menu' }]
+        ]
+      }
+    });
+  }
+
   if (data.startsWith('do_deploy:')) {
     const name = state.getLong(data.split(':')[1]);
     await handleDoDeploy(bot, chatId, name);
@@ -321,12 +334,27 @@ async function handleDoDeploy(bot, chatId, name, args = {}) {
     bot.sendMessage(chatId, `🚀 <b>Deploying ${name}...</b>`, { parse_mode: 'HTML' });
     try {
         const buildDir = state.getSessionBuildDir();
-        const codePath = path.join(buildDir, `${name}.code.boc`);
-        if (!fs.existsSync(codePath)) throw new Error(`Code BOC not found for ${name}`);
+        let baseName = name;
+        let codePath = path.join(buildDir, `${baseName}.code.boc`);
+        let abiPath = path.join(buildDir, `${baseName}.abi`);
+        let dataPath = path.join(buildDir, `${baseName}.data.boc`);
+        
+        if (!fs.existsSync(codePath)) {
+            const files = fs.readdirSync(buildDir);
+            const match = files.find(f => f.endsWith(`_${name}.code.boc`) || f === `${name}.code.boc`);
+            if (match) {
+                baseName = match.replace('.code.boc', '');
+                codePath = path.join(buildDir, `${baseName}.code.boc`);
+                abiPath = path.join(buildDir, `${baseName}.abi`);
+                dataPath = path.join(buildDir, `${baseName}.data.boc`);
+            }
+        }
+
+        if (!fs.existsSync(codePath)) throw new Error(`Artifacts for "${baseName}" not found. Compile first.`);
+        
         const codeCell = Cell.fromBoc(fs.readFileSync(codePath))[0];
         
         let dataCell;
-        const abiPath = path.join(buildDir, `${name}.abi`);
         if (fs.existsSync(abiPath) && Object.keys(args).length > 0) {
             const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
             const initDef = abi.init;
@@ -338,7 +366,6 @@ async function handleDoDeploy(bot, chatId, name, args = {}) {
         }
         
         if (!dataCell) {
-            const dataPath = path.join(buildDir, `${name}.data.boc`);
             dataCell = fs.existsSync(dataPath) ? Cell.fromBoc(fs.readFileSync(dataPath))[0] : beginCell().storeBit(0).endCell();
         }
 
